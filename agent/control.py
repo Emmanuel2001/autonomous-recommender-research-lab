@@ -12,8 +12,8 @@ WHAT THIS PROCESS CANNOT DO, and why it is built that way:
     alter a ledger entry -- it can only ask the scorer, over the socket, to sign one.
     The UI therefore cannot start a scorer either; it tells the operator to, which is
     the honest consequence of not being trusted with the key.
-  * It NEVER OPENS A LEDGER FOR WRITING, and every launch is given a freshly generated
-    ledger path. There is no code path from an HTTP request to an existing chain.
+  * It NEVER OPENS A LEDGER FOR WRITING. The separately started scorer owns and reports
+    the ledger path; there is no code path from an HTTP request to a chain's bytes.
   * It BINDS 127.0.0.1 ONLY, requires a per-start token on every request, and checks the
     Host and Origin headers. Localhost is not a security boundary on its own: any page in
     the operator's browser can POST to 127.0.0.1, so a bare local server that launches
@@ -36,6 +36,7 @@ import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
+from agent import console_ui as UI
 from agent import control_launch as CL
 from agent.official_report import CSS, build as build_report, is_official, load as load_ledger
 
@@ -45,6 +46,17 @@ LOG_TAIL = 16_000                         # bytes of run output shown in the bro
 
 TOKEN = ""
 RUNNER = CL.Runner()
+_CAP_CACHE: tuple[float, dict] | None = None
+
+
+def capabilities() -> dict:
+    """Measured hardware for the setup page, cached because importing torch is expensive."""
+    global _CAP_CACHE
+    now = time.time()
+    if _CAP_CACHE is None or now - _CAP_CACHE[0] > 60:
+        from core.execution import public_capabilities
+        _CAP_CACHE = (now, public_capabilities())
+    return dict(_CAP_CACHE[1])
 
 
 # ------------------------------------------------------------------ ledger index
@@ -55,7 +67,7 @@ def ledger_index() -> list[dict]:
         row = {"name": p.name, "bytes": p.stat().st_size,
                "mtime": p.stat().st_mtime, "entries": 0, "official": False,
                "best": None, "proposer": None, "model": None, "termination": None,
-               "arm": None}
+               "arm": None, "research": False}
         try:
             e = load_ledger(p)
             row["entries"] = len(e)
@@ -68,6 +80,7 @@ def ledger_index() -> list[dict]:
                     row["model"] = b.get("model")
                     row["arm"] = ("code-first" if b.get("driver") == "research_driver"
                                   else "typed")
+                    row["research"] = b.get("driver") == "research_driver"
                 elif k == "run_end":
                     row["termination"] = b.get("termination") or b.get("reason")
                     if b.get("best_valid_primary") is not None:
@@ -92,6 +105,175 @@ def resolve_ledger(name: str) -> Path:
     return known[name]
 
 
+def research_events(entries: list[dict], after: int = -1) -> list[dict]:
+    """Ledger records -> safe, compact decision-trace events for live UI and replay.
+
+    This is intentionally interpretation-light.  Signed scores are labelled signed;
+    hypotheses, judge rationales and reflections are labelled LLM-authored.  The UI must
+    not turn commentary into evidence merely by drawing it in the same colour.
+    """
+    out = []
+    for x in entries:
+        seq = x.get("seq")
+        if not isinstance(seq, int) or seq <= after:
+            continue
+        payload = x.get("payload") or {}
+        body = payload.get("body") or {}
+        kind = payload.get("kind") or ""
+        what = body.get("what") or kind
+        event = {"seq": seq, "iteration": body.get("iteration"),
+                 "kind": str(what or "event"), "signed": False,
+                 "origin": "harness", "title": "Event", "summary": "", "detail": {}}
+        if kind == "run_start":
+            event.update(title="Run started", summary=(
+                f"{body.get('research_policy', 'research')} policy · "
+                f"{body.get('seed_profile', 'unknown')} seed · "
+                f"{body.get('isolation', 'unknown')} isolation"))
+            event["detail"] = {
+                "model routing": body.get("model_routing"),
+                "execution": body.get("execution_profile"),
+                "hardware": body.get("hardware_capabilities")}
+        elif what == "tournament":
+            cs = body.get("candidates") or []
+            chosen = body.get("selected_id")
+            event.update(origin="LLM decision",
+                         title=f"Hypothesis tournament · {len(cs)} considered",
+                         summary=f"Judge selected {chosen}; one candidate will be evaluated")
+            event["detail"] = {
+                "candidates": [{k: c.get(k) for k in
+                                ("id", "lane", "hypothesis", "files_to_change")}
+                               for c in cs],
+                "judge": body.get("judge"), "selected": chosen}
+        elif kind == "proposal" and what == "candidate_proposal":
+            event.update(origin="LLM hypothesis · harness-registered",
+                         title="Candidate pre-registered",
+                         summary=str(body.get("hypothesis") or "")[:400])
+            event["detail"] = {"tree": body.get("tree"),
+                               "files changed": body.get("files_changed"),
+                               "expected magnitude": body.get("expected_magnitude"),
+                               "diff bytes": body.get("diff_bytes"),
+                               "execution request": (body.get("config") or {}).get("execution")}
+        elif kind in ("score", "confirmation", "final_validation") and payload.get("metrics"):
+            m = payload.get("metrics") or {}
+            primary = m.get("primary")
+            event.update(origin="scorer", title="Scorer-signed result", signed=True,
+                         summary=(f"primary {float(primary):.6f}" if
+                                  isinstance(primary, (int, float)) else str(m)))
+            event["detail"] = {"metrics": m,
+                               "delta vs baseline": (payload.get("delta_vs_official_baseline")
+                                                    or payload.get("delta_vs_declared_baseline")),
+                               "flags": payload.get("flags"),
+                               "tree": payload.get("config_hash")}
+        elif what in ("candidate_failed", "scorer_refused", "metric_disagreement"):
+            event.update(title=str(what).replace("_", " ").title(),
+                         summary=str(body.get("error") or body.get("error_type") or "")[:400])
+            event["detail"] = {k: body.get(k) for k in
+                               ("tree", "error_type", "error_frame", "execution", "isolation")}
+        elif what == "llm_thought_summary":
+            summaries = body.get("summaries") or []
+            event.update(origin="provider public summary",
+                         title=f"{str(body.get('role') or 'LLM').title()} thought summary",
+                         summary=str(summaries[0] if summaries else "")[:600])
+            event["detail"] = {"role": body.get("role"), "stage": body.get("stage"),
+                               "model": body.get("model"),
+                               "thinking tokens": body.get("thinking_tokens"),
+                               "public summaries": summaries,
+                               "disclosure": body.get("note")}
+        elif what in ("iteration_result", "experiment_result", "reflection", "belief_update"):
+            event.update(origin="LLM reflection · harness outcome",
+                         title=str(what).replace("_", " ").title(),
+                         summary=str(body.get("outcome") or body.get("why") or "")[:400])
+            event["detail"] = body
+        elif kind == "run_end":
+            champ = body.get("champion") or {}
+            event.update(title="Run complete",
+                         summary=(f"{body.get('termination', 'complete')} · champion "
+                                  f"{str(champ.get('tree') or '')[:12]} · "
+                                  f"primary {champ.get('primary')}"))
+            event["detail"] = {"stats": body.get("stats"),
+                               "usage by role": body.get("usage_by_role"),
+                               "beliefs": body.get("beliefs")}
+        else:
+            # Keep only events useful to understanding the research loop. Infrastructure
+            # heartbeats remain in the full report and signed ledger.
+            if not what:
+                continue
+            event.update(title=str(what).replace("_", " ").title(),
+                         summary=str(body.get("reason") or body.get("error") or "")[:400])
+            event["detail"] = {k: v for k, v in body.items()
+                               if k not in ("diff", "source")}
+        out.append(event)
+    return out
+
+
+def timeline_html(events: list[dict]) -> str:
+    if not events:
+        return "<div class='note muted'>No research events recorded yet.</div>"
+    # A multi-seed confirmation appends two signed scores per seed. Forty nearly identical
+    # cards pushed the actual tournament/judge/reflection off the live page—the exact
+    # opposite of a decision trace. Collapse only consecutive CONFIRMATION entries; replay
+    # and the ledger keep every signed record individually.
+    compact = []
+    for e in events:
+        if e.get("kind") == "confirmation":
+            if compact and compact[-1].get("kind") == "confirmation_batch":
+                batch = compact[-1]
+                batch["detail"]["count"] += 1
+                batch["detail"]["last seq"] = e["seq"]
+                batch["seq"] = e["seq"]
+                batch["title"] = f"{batch['detail']['count']} signed confirmation scores"
+                batch["summary"] = ("Collapsed in this live trace; replay and ledger retain "
+                                    "every signed score")
+            else:
+                compact.append({"seq": e["seq"], "iteration": e.get("iteration"),
+                                "kind": "confirmation_batch", "signed": True,
+                                "origin": "scorer",
+                                "title": "1 signed confirmation score",
+                                "summary": ("Collapsed in this live trace; replay and ledger "
+                                            "retain every signed score"),
+                                "detail": {"count": 1, "first seq": e["seq"],
+                                           "last seq": e["seq"]}})
+        else:
+            compact.append(e)
+    cards = []
+    for e in compact[-18:]:
+        detail = json.dumps(e.get("detail") or {}, indent=1, default=str)[:2400]
+        badge = "signed scorer evidence" if e.get("signed") else e.get("origin", "harness")
+        cards.append(
+            f"<article class='event {'signed' if e.get('signed') else ''}'>"
+            f"<div class=eventmeta>seq {e['seq']} &middot; {html.escape(badge)}"
+            + (f" &middot; iteration {e['iteration']}" if e.get("iteration") is not None else "")
+            + f"</div><h3>{html.escape(e['title'])}</h3>"
+              f"<p>{html.escape(e.get('summary') or '')}</p>"
+              f"<details><summary>structured detail</summary><pre>"
+              f"{html.escape(detail)}</pre></details></article>")
+    return "<div class=timeline>" + "".join(cards) + "</div>"
+
+
+def replay_page(name: str, events: list[dict]) -> str:
+    data = json.dumps(events, ensure_ascii=False, default=str).replace("</", "<\\/")
+    return f"""<!doctype html><html><head><meta charset=utf-8>
+<meta name=viewport content='width=device-width,initial-scale=1'>
+<title>Research replay · {html.escape(name)}</title><style>{CSS}
+.event{{border-left:4px solid var(--accent);padding:12px 16px;margin:12px 0;background:var(--card)}}
+.event.signed{{border-color:var(--good)}} .eventmeta{{color:var(--mut);font-size:12px}}
+pre{{white-space:pre-wrap;overflow:auto}} .controls{{display:flex;gap:8px;align-items:center}}
+</style></head><body><main><p><a href='/?t={TOKEN}'>&larr; dashboard</a></p>
+<h1>Signed research replay</h1><p class=sub>{html.escape(name)} · recorded evidence, not a new run</p>
+<div class=controls><button id=play>Replay</button><button id=all>Show all</button>
+<span id=count></span></div><div id=events></div></main>
+<script>const EVENTS={data}; const root=document.getElementById('events'); let timer=null;
+function card(e){{const a=document.createElement('article');a.className='event'+(e.signed?' signed':'');
+ const m=document.createElement('div');m.className='eventmeta';m.textContent=`seq ${{e.seq}} · ${{e.signed?'signed scorer evidence':(e.origin||'harness')}}${{e.iteration==null?'':` · iteration ${{e.iteration}}`}}`;
+ const h=document.createElement('h3');h.textContent=e.title;const p=document.createElement('p');p.textContent=e.summary||'';
+ const d=document.createElement('details');const s=document.createElement('summary');s.textContent='structured detail';
+ const pre=document.createElement('pre');pre.textContent=JSON.stringify(e.detail||{{}},null,2);d.append(s,pre);a.append(m,h,p,d);root.append(a);}}
+function showAll(){{clearInterval(timer);root.textContent='';EVENTS.forEach(card);document.getElementById('count').textContent=`${{EVENTS.length}} events`;}}
+function replay(){{clearInterval(timer);root.textContent='';let i=0;document.getElementById('count').textContent='';timer=setInterval(()=>{{if(i>=EVENTS.length){{clearInterval(timer);return}}card(EVENTS[i++]);document.getElementById('count').textContent=`${{i}} / ${{EVENTS.length}}`;window.scrollTo(0,document.body.scrollHeight)}},650)}}
+document.getElementById('play').onclick=replay;document.getElementById('all').onclick=showAll;showAll();</script>
+</body></html>"""
+
+
 # ------------------------------------------------------------------ page
 def _opt(vals, cur) -> str:
     return "".join(f"<option value='{html.escape(v)}'"
@@ -99,175 +281,152 @@ def _opt(vals, cur) -> str:
                    for v in vals)
 
 
-def dashboard(msg: str = "", err: str = "") -> str:
+def _run_state(st: dict, chosen: str | None, chosen_is_research: bool) -> str:
+    """Honest run state.
+
+    The old page said "No run has been started from this UI." whenever RUNNER was idle --
+    which is true and useless: a run launched from a terminal, with its evidence sitting in
+    a ledger this page is displaying, was reported as though nothing had happened. An
+    externally launched run is OBSERVED, not absent.
+    """
+    if st["state"] == "running":
+        return (f"<span class='badge b-running'>running</span> pid {st['pid']} &middot; "
+                f"{st['seconds']:.0f}s")
+    if st["state"] == "finished":
+        return (f"<span class='badge b-promoted'>finished</span> exit "
+                f"{st['returncode']} after {st['seconds']:.0f}s")
+    if chosen and chosen_is_research:
+        return ("<span class='badge b-promoted'>observed external run</span> "
+                "launched outside this UI; recorded evidence below")
+    if chosen:
+        return "<span class='badge b-proposed'>observed ledger</span> not launched here"
+    return "<span class='badge b-proposed'>no run started</span>"
+
+
+def dashboard(msg: str = "", err: str = "", want: str = "") -> str:
+    """The five-view console. Presentation lives in agent/console_ui.py; this function
+    only decides WHICH recorded ledger to show and hands it over."""
     st = RUNNER.status()
-    live = st["state"] == "running"
     scorer = RUNNER.scorer_ready()
-    rows = []
-    for r in ledger_index():
-        age = time.strftime("%Y-%m-%d %H:%M", time.localtime(r["mtime"]))
-        link = (f"<a href='/report?ledger={urllib.parse.quote(r['name'])}&t={TOKEN}'>"
-                f"report</a>" if r["official"] and r["entries"] else
-                ("<span class=muted>legacy</span>" if r["entries"]
-                 else "<span class=muted>empty</span>"))
-        # A ledger that tripped ledger_index's broad `except` used to be rendered with
-        # whatever partial numbers had been gathered and NO indication -- the error was
-        # stored in row["error"] and never read by anything. Say so instead.
-        if r.get("error"):
-            rows.append(
-                f"<tr><td class=mono>{html.escape(r['name'])}</td>"
-                f"<td class='n bad'>!</td>"
-                # colspan is (total columns - the 4 cells this row draws itself). The
-                # table has 9 columns, so 5. It was 5 against an EIGHT-column header
-                # before, i.e. one too many -- an unreadable ledger's row shifted the
-                # table by a column, which is only visible when a ledger fails to load.
-                f"<td colspan=5 class=bad>unreadable: {html.escape(str(r['error'])[:160])} "
-                f"&mdash; any numbers for this ledger would be partial, so none are shown</td>"
-                f"<td class=muted>{age}</td><td>&ndash;</td></tr>")
-            continue
-        # `best` comes from ledger JSON with only an `is not None` check, and this format()
-        # sits OUTSIDE ledger_index's try -- so one ledger carrying a string there killed the
-        # whole dashboard with a ValueError inside do_GET.
-        try:
-            best_txt = "&ndash;" if r["best"] is None else format(float(r["best"]), ".5f")
-        except (TypeError, ValueError):
-            best_txt = f"<span class=bad>?{html.escape(str(r['best'])[:12])}</span>"
-        rows.append(
-            f"<tr><td class=mono>{html.escape(r['name'])}</td>"
-            f"<td class=n>{r['entries']}</td>"
-            f"<td class=n>{best_txt}</td>"
-            f"<td>{'<b>code-first</b>' if r.get('arm') == 'code-first' else html.escape(str(r.get('arm') or '&ndash;'))}</td>"
-            f"<td>{html.escape(str(r['proposer'] or '&ndash;'))}</td>"
-            f"<td class='mono wrap'>{html.escape(str(r['model'] or ''))}</td>"
-            f"<td class='muted wrap'>{html.escape(str(r['termination'] or ''))}</td>"
-            f"<td class=muted>{age}</td><td>{link}</td></tr>")
+    index = ledger_index()
+
+    # Prefer the ledger of a run started here; otherwise the most recent research ledger.
+    chosen = None
+    if want and want in {r["name"] for r in index}:
+        chosen = want
+    lv = st.get("ledger")
+    if chosen is None and lv:
+        cand = Path(str(lv)).name
+        if cand in {r["name"] for r in index}:
+            chosen = cand
+    if want and want in {r["name"] for r in index}:
+        chosen = want                       # explicit operator choice wins
+    if chosen is None:
+        chosen = next((r["name"] for r in index if r.get("research")), None)
+    if chosen is None:
+        chosen = next((r["name"] for r in index if r["entries"]), None)
+    row = next((r for r in index if r["name"] == chosen), {})
 
     banner = ""
     if err:
-        banner = f"<div class='note warn'><b>Refused.</b> {html.escape(err)}</div>"
+        banner = f"<div class='note bad'><b>Refused.</b> {html.escape(err)}</div>"
     elif msg:
-        banner = f"<div class='note'>{html.escape(msg)}</div>"
+        banner = f"<div class='note info'>{html.escape(msg)}</div>"
+    if st["state"] == "running":
+        banner += (f"<form method=post action='/stop?t={TOKEN}'>"
+                   f"<button class='btn danger'>Stop this run</button></form>")
 
-    if not scorer:
-        banner += ("<div class='note warn'><b>No scorer is listening.</b> It holds the "
-                   "signing key, and this UI deliberately does not &mdash; so it cannot "
-                   "start one for you. In another terminal:<br>"
-                   "<span class=mono>python3 -m core.scorer serve --task official</span>"
-                   "</div>")
-    else:
-        led = CL.scorer_ledger()
-        banner += ("<div class='note'>Scorer is listening and writing to "
-                   f"<span class=mono>{html.escape(str(led or 'unknown'))}</span>. The "
-                   "scorer chooses that file, not this UI &mdash; start it with a "
-                   "different <span class=mono>TRACK2_LEDGER</span> to scope a run to its "
-                   "own chain.</div>")
+    # Ledger switcher + report/replay. A ledger gets these links because it HAS ENTRIES --
+    # not because it satisfies is_official(). The portable pilot is is_official=False and
+    # is_research=True, and gating on `official` labelled it "legacy" and withheld both
+    # links from a completed run.
+    opts = []
+    for r in index:
+        kind = ("code-first research" if r.get("research")
+                else "typed-action" if r["entries"] else "empty")
+        sel = " selected" if r["name"] == chosen else ""
+        short = "research" if r.get("research") else ("typed" if r["entries"] else "empty")
+        opts.append(f"<option value='{html.escape(r['name'])}'{sel}>"
+                    f"{html.escape(r['name'])} &middot; {r['entries']}e &middot; "
+                    f"{short}</option>")
+    links = ""
+    if chosen:
+        q = urllib.parse.quote(chosen)
+        links = (f"<div class=strip>"
+                 f"<div class=cell><div class=k>showing</div>"
+                 f"<div class='v mono'>{html.escape(chosen)}</div></div>"
+                 f"<div class=cell><div class=k>classification</div><div class=v>"
+                 f"{'code-first research' if row.get('research') else 'typed-action'}"
+                 f"</div></div>"
+                 f"<div class=cell><div class=k>full report</div>"
+                 f"<div class=v><a href='/report?ledger={q}&t={TOKEN}'>open report</a></div></div>"
+                 f"<div class=cell><div class=k>event replay</div>"
+                 f"<div class=v><a href='/replay?ledger={q}&t={TOKEN}'>open replay</a></div></div>"
+                 f"</div>"
+                 f"<form method=get action='/' class=presets>"
+                 f"<input type=hidden name=t value='{TOKEN}'>"
+                 f"<label class=f>switch ledger<select name=ledger>{''.join(opts)}</select>"
+                 f"</label><button class='btn ghost'>Show</button></form>")
 
-    if live:
-        state = (f"<div class='note'><b>Running</b> &middot; pid {st['pid']} &middot; "
-                 f"{html.escape(str(st['proposer']))}"
-                 f"{' / ' + html.escape(str(st['model'])) if st.get('model') else ''} "
-                 f"&middot; {st['seconds']:.0f}s &middot; ledger "
-                 f"<span class=mono>{html.escape(str(st['ledger']))}</span></div>"
-                 f"<form method=post action='/stop?t={TOKEN}'>"
-                 f"<button class='btn danger'>Stop this run</button></form>")
-    elif st["state"] == "finished":
-        state = (f"<div class='note'>Last run exited with code "
-                 f"<b>{st['returncode']}</b> after {st['seconds']:.0f}s &middot; ledger "
-                 f"<span class=mono>{html.escape(str(st['ledger']))}</span></div>")
-    else:
-        state = "<div class='note muted'>No run has been started from this UI.</div>"
-
-    log = ""
-    if RUNNER.log and RUNNER.log.exists():
+    # ---- runs on disk -------------------------------------------------------------
+    # The redesign initially dropped this table, which also dropped the only place an
+    # UNREADABLE ledger was surfaced -- a ledger that trips ledger_index's except used to be
+    # rendered with whatever partial numbers had been gathered and no indication at all.
+    # Restored with the same columns, and the same colspan arithmetic: the header has 9
+    # columns, so an error row drawing 4 cells of its own spans the remaining 5.
+    trows = []
+    for r in index:
+        age = time.strftime("%Y-%m-%d %H:%M", time.localtime(r["mtime"]))
+        q = urllib.parse.quote(r["name"])
+        if r.get("error"):
+            trows.append(
+                f"<tr><td class=mono>{html.escape(r['name'])}</td>"
+                f"<td class=n>!</td>"
+                f"<td colspan=5>unreadable: {html.escape(str(r['error'])[:140])} &mdash; any "
+                f"numbers for this ledger would be partial, so none are shown</td>"
+                f"<td class=dim>{age}</td><td>&ndash;</td></tr>")
+            continue
         try:
-            with open(RUNNER.log, "rb") as fh:
-                fh.seek(0, os.SEEK_END)
-                fh.seek(max(0, fh.tell() - LOG_TAIL))
-                tail = fh.read().decode("utf-8", "replace")
-        except OSError as exc:
-            tail = f"(log unreadable: {exc})"
-        log = ("<h2>Run output</h2><pre class=log id=log>"
-               + html.escape(tail) + "</pre>")
+            best_txt = "&mdash;" if r["best"] is None else format(float(r["best"]), ".6f")
+        except (TypeError, ValueError):
+            best_txt = f"<span class=bad>?{html.escape(str(r['best'])[:12])}</span>"
+        link = (f"<a href='/report?ledger={q}&t={TOKEN}'>report</a>"
+                + (f" &middot; <a href='/replay?ledger={q}&t={TOKEN}'>replay</a>"
+                   if r.get("research") else "")) if r["entries"] else \
+               "<span class=dim>empty</span>"
+        trows.append(
+            f"<tr><td class=mono>{html.escape(r['name'])}</td>"
+            f"<td class=n>{r['entries']}</td>"
+            f"<td class=n>{best_txt}</td>"
+            f"<td>{'code-first' if r.get('research') else html.escape(str(r.get('arm') or '&ndash;'))}</td>"
+            f"<td>{html.escape(str(r['proposer'] or '&ndash;'))}</td>"
+            f"<td class=mono>{html.escape(str(r['model'] or ''))}</td>"
+            f"<td class=dim>{html.escape(str(r['termination'] or ''))}</td>"
+            f"<td class=dim>{age}</td><td>{link}</td></tr>")
+    runs_table = ("<h2>Runs on disk</h2><div class=tablewrap><table><thead><tr>"
+                  "<th>ledger</th><th>entries</th><th>best signed</th><th>arm</th>"
+                  "<th>proposer</th><th>model</th><th>termination</th><th>updated</th>"
+                  "<th>links</th></tr></thead><tbody>"
+                  + ("".join(trows) or "<tr><td colspan=9 class=dim>no ledgers yet</td></tr>")
+                  + "</tbody></table></div>")
 
-    d = CL.Spec()
-    form = f"""<form method=post action='/launch?t={TOKEN}' class=form>
-<div class=fields>
-<label>loop<select name=driver>{_opt(CL.DRIVERS, d.driver)}</select></label>
-<label>proposer <span class=muted>(typed)</span><select name=proposer>{_opt(CL.PROPOSERS, d.proposer)}</select></label>
-<label>backend <span class=muted>(code-first)</span><select name=backend>{_opt(CL.BACKENDS, d.backend)}</select></label>
-<label>model <input name=model placeholder='gemini-3.5-flash-lite' size=22></label>
-<label>iterations<input name=iterations type=number min=1 max=200 value='{d.iterations}'></label>
-<label>search seed <span class=muted>(typed; seeds the SEARCH, not the model)</span>
-<input name=seed type=number min=0 value='{d.seed}'></label>
-<label>model seed <span class=muted>(typed; reaches the fit's RNG)</span>
-<input name=model_seed type=number min=0 value='{d.model_seed}'></label>
-<label>convergence<select name=convergence>{_opt(CL.CONVERGENCE, d.convergence)}</select></label>
-<label>start loss <span class=muted>(typed)</span><select name=start_loss>{_opt(CL.LOSSES, d.start_loss)}</select></label>
-<label>sandbox<select name=patch_isolation>
-{_opt([i for i in CL.ISOLATION if i != 'none'], d.patch_isolation)}</select></label>
-<label>max seconds <span class=muted>(typed)</span><input name=max_seconds type=number min=10 max=86400 value='{d.max_seconds:.0f}'></label>
-<label>wall cap h <span class=muted>(code-first)</span><input name=max_wall_seconds type=number min=60 max=21600 value='{d.max_wall_seconds:.0f}'></label>
-<label>repairs <span class=muted>(code-first)</span><input name=max_repairs type=number min=0 max=5 value='{d.max_repairs}'></label>
-<label>tag<input name=tag value='ui' size=10></label>
-</div>
-<label>seed config override <span class=muted>(code-first; leave EMPTY to start from the
-unmodified official baseline &mdash; anything here is recorded in the ledger as a
-disclosure)</span>
-<input name=seed_config placeholder='{{"loss": "pairwise"}}' size=40></label>
-<label class=chk><input type=checkbox name=allow_random_log value=1>
-train on <span class=mono>log_random</span> (a rules judgement &mdash; refusals are recorded)</label>
-<button class=btn {'disabled' if (live or not scorer) else ''}>Launch run</button>
-{"<span class=muted>&nbsp; a run is already in flight</span>" if live else ""}
-</form>"""
+    if not chosen:
+        return UI.page(token=TOKEN, run_state=_run_state(st, None, False),
+                       scorer_ready=scorer, d=UI.digest([]), ledger_name="(none)",
+                       verify_note="no ledger present", banner=banner, links=links,
+                       runs_table=runs_table)
 
-    extra = """
-.btn{font:inherit;padding:8px 15px;border-radius:6px;border:1px solid var(--rule);
-background:var(--accent);color:#fff;cursor:pointer;margin-top:12px}
-.btn[disabled]{opacity:.45;cursor:not-allowed}
-.btn.danger{background:var(--bad)}
-.form{background:var(--card);border:1px solid var(--rule);border-radius:7px;padding:16px}
-.fields{display:grid;grid-template-columns:repeat(auto-fit,minmax(165px,1fr));gap:12px}
-label{display:flex;flex-direction:column;gap:4px;font-size:11.5px;color:var(--mut);
-text-transform:uppercase;letter-spacing:.05em}
-input,select{font:14px ui-sans-serif,system-ui,sans-serif;padding:6px 8px;
-border:1px solid var(--rule);border-radius:5px;background:var(--bg);color:var(--fg)}
-label.chk{flex-direction:row;align-items:center;gap:8px;text-transform:none;
-letter-spacing:0;font-size:13px;margin-top:14px}
-label.chk input{width:auto}
-pre.log{background:var(--card);border:1px solid var(--rule);border-radius:7px;
-padding:12px 14px;overflow:auto;max-height:340px;font:12px/1.5 ui-monospace,Menlo,monospace;
-white-space:pre-wrap;word-break:break-word}
-"""
-    poll = ("<script>setTimeout(function(){location.reload()},4000)</script>"
-            if live else "")
-    return f"""<!doctype html><html><head><meta charset=utf-8>
-<title>Track 2 control plane</title>
-<meta name=viewport content='width=device-width,initial-scale=1'>
-<style>{CSS}{extra}</style></head><body><main>
-<h1>Track 2 &mdash; control plane</h1>
-<p class=sub>Launch and watch autonomous MLE runs, and read the report of any ledger.
-This process holds <b>no signing key</b> and never writes a ledger: it asks the scorer,
-over a local socket, to sign what a run produces.</p>
-{banner}
-<h2>Current run</h2>{state}
-<h2>Launch</h2>{form}
-{log}
-<h2>Ledgers</h2>
-<div class=scroll><table><thead><tr><th>ledger</th><th>entries</th><th>best valid</th>
-<th>arm</th><th>proposer</th><th>model</th><th>termination</th><th>modified</th>
-<th></th></tr></thead>
-<tbody>{''.join(rows) or '<tr><td colspan=8 class=muted>no ledgers yet</td></tr>'}
-</tbody></table></div>
-<h2>What this UI cannot do</h2>
-<div class=note>It cannot sign a ledger entry (no key), cannot write or delete an
-existing ledger (every launch gets a fresh path), cannot start the scorer, cannot run
-more than one driver at once, and cannot pass a value the driver would reject &mdash;
-every field is checked against the driver&rsquo;s own choices before a process starts.
-Bound to <span class=mono>127.0.0.1</span> with a per-start token.</div>
-</main>{poll}</body></html>"""
+    entries = load_ledger(resolve_ledger(chosen))
+    d = UI.digest(entries, run_name=chosen)
+    verify_note = (f"{len(entries)} entries loaded; hash ordering and artifact hashes are "
+                   f"recomputed in the full report. Signature checking needs the signing "
+                   f"key, which this process must not hold.")
+    return UI.page(token=TOKEN, run_state=_run_state(st, chosen, bool(row.get("research"))),
+                   scorer_ready=scorer, d=d, ledger_name=chosen,
+                   verify_note=verify_note, banner=banner, links=links,
+                   runs_table=runs_table)
 
 
-# ------------------------------------------------------------------ http
 class Handler(BaseHTTPRequestHandler):
     server_version = "track2-control"
     protocol_version = "HTTP/1.1"
@@ -401,12 +560,42 @@ class Handler(BaseHTTPRequestHandler):
             return self._html(403, "<h1>403</h1><p>Missing or bad token. Use the URL "
                                    "printed in the terminal that started this UI.</p>")
         if u.path == "/":
-            return self._html(200, dashboard(msg=(q.get("msg", [""])[0]),
+            want = q.get("ledger", [""])[0]
+            if want:
+                try:
+                    resolve_ledger(want)          # membership test, not a path join
+                except KeyError:
+                    return self._html(404, "<h1>404</h1><p>No such ledger.</p>")
+            return self._html(200, dashboard(want=want,
+                                             msg=(q.get("msg", [""])[0]),
                                              err=(q.get("err", [""])[0])))
         if u.path == "/status":
             body = json.dumps({"run": RUNNER.status(),
-                               "scorer": RUNNER.scorer_ready()}, indent=1).encode()
+                               "scorer": RUNNER.scorer_ready(),
+                               "capabilities": capabilities()}, indent=1).encode()
             return self._send(200, body, "application/json")
+        if u.path == "/capabilities":
+            return self._send(200, json.dumps(capabilities(), indent=1).encode(),
+                              "application/json")
+        if u.path == "/events":
+            name = q.get("ledger", [""])[0]
+            try:
+                after = int(q.get("after", ["-1"])[0])
+                p = resolve_ledger(name)
+            except (KeyError, TypeError, ValueError):
+                return self._html(404, "<h1>404</h1><p>No such ledger or bad cursor.</p>")
+            ev = research_events(load_ledger(p), after=after)
+            body = json.dumps({"ledger": name, "events": ev,
+                               "last_seq": ev[-1]["seq"] if ev else after},
+                              default=str).encode()
+            return self._send(200, body, "application/json")
+        if u.path == "/replay":
+            name = q.get("ledger", [""])[0]
+            try:
+                p = resolve_ledger(name)
+            except KeyError:
+                return self._html(404, "<h1>404</h1><p>No such ledger.</p>")
+            return self._html(200, replay_page(name, research_events(load_ledger(p))))
         if u.path == "/report":
             name = q.get("ledger", [""])[0]
             try:

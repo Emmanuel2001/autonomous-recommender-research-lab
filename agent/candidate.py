@@ -38,7 +38,9 @@ ROOT = Path(__file__).resolve().parents[1]
 #: below takes an explicit `workspace` so nothing silently mixes two profiles' contracts.
 WORKSPACE = ROOT / "research_workspace"
 WORKSPACE_MINIMAL = ROOT / "research_workspace_minimal"
-PROFILES = {"inherited": WORKSPACE, "minimal": WORKSPACE_MINIMAL}
+WORKSPACE_ACCELERATED = ROOT / "research_workspace_accelerated"
+PROFILES = {"inherited": WORKSPACE, "minimal": WORKSPACE_MINIMAL,
+            "accelerated": WORKSPACE_ACCELERATED}
 
 
 def workspace_for(profile: str) -> Path:
@@ -87,6 +89,7 @@ def profile_provenance(profile: str) -> dict:
     extra_model = sorted(mfns - BASELINE_FM - {"step_pairwise", "step_listwise"})
     extra_classes = sorted(mcls - {"FM"})
     return {"seed_profile": profile, "workspace": w.name,
+            "official_numpy_seed": profile in ("inherited", "minimal"),
             "pairwise_code_present": pairwise,
             "listwise_code_present": listwise,
             "alternative_architecture_code_present": bool(extra_model or extra_classes),
@@ -242,7 +245,9 @@ def run_candidate(files: dict, params: dict | None = None, *, run_dir: Path,
                   task: str = "kuairand_pure", backend: str = "seatbelt",
                   max_seconds: float = 900.0,
                   artifact_root: Path = AR.ARTIFACTS,
-                  workspace: Path | None = None) -> dict:
+                  workspace: Path | None = None,
+                  execution_profile=None,
+                  task_spec_path: str | Path | None = None) -> dict:
     """Store, materialise, and run one candidate behind the sandbox.
 
     Never raises on a candidate that fails: a bad candidate is DATA about the agent, and
@@ -271,26 +276,54 @@ def run_candidate(files: dict, params: dict | None = None, *, run_dir: Path,
                          f"{dep_report['failed']}",
                 "contract_violation": False, "static": meta}
 
+    # Resolve numerical hardware before entering the sandbox.  Generated code receives
+    # only a declared framework/device, never permission to inspect or launch arbitrary
+    # host processes.  The resolution report is attached to the result so "GPU" is a
+    # measured property of an experiment, not a claim in its prose.
+    from core import execution as EX
+    try:
+        experiment = EX.ExperimentSpec.from_candidate(
+            task=task, config=meta["config"], imports=meta["imports"],
+            dependencies=declared, operator_profile=execution_profile)
+        execution = EX.resolve(experiment)
+    except EX.ExecutionError as e:
+        return {"ok": False, "tree": art.tree, "error_type": "ExecutionUnavailable",
+                "error": str(e), "contract_violation": False, "static": meta}
+    meta["experiment_spec"] = experiment.to_dict()
+    meta["execution"] = execution.to_dict()
+
     # resolve(): the sandbox profile is built from this path and seatbelt matches only
     # absolute ones. A relative run_dir produced a profile that granted nothing.
     run_dir = Path(run_dir).resolve()
-    cand_dir = run_dir / "source"
+    # Execute the content-addressed source directly, OUTSIDE the writable output tree.
+    # Keeping a second copy at run_dir/source made the statement "a candidate cannot edit
+    # its own source" false: run_dir is intentionally the sandbox's write allowance.
+    # Seatbelt now denies writes here; Docker mounts this directory read-only.
+    cand_dir = art.source_dir.resolve()
     run_dir.mkdir(parents=True, exist_ok=True)
-    AR.materialise(art.tree, cand_dir, root=artifact_root)
 
     # out_dir is THIS candidate's directory, so the sandbox's write grant is scoped to it.
     # The default (runs/iso) let any candidate write over a sibling's scores.
-    sb = I.make_sandbox(backend, out_dir=run_dir)
+    task_spec = None
+    if task_spec_path:
+        from core.task import load as load_task
+        task_spec = load_task(task_spec_path)
+    sb = I.make_sandbox(backend, out_dir=run_dir, task_spec=task_spec,
+                        device=execution.device)
     try:
-        env_extra = {}
+        env_extra = dict(execution.environment)
         if dep_report.get("pythonpath"):
             existing = os.environ.get("PYTHONPATH", "")
             env_extra["PYTHONPATH"] = (dep_report["pythonpath"]
                                        + (os.pathsep + existing if existing else ""))
+        child_task_spec = (sb.data.path / I.PORTABLE_SPEC_NAME
+                           if task_spec is not None else None)
         report = sb.run(["-m", "strategy.candidate_runner",
                          "--candidate", str(cand_dir),
                          "--workspace", str(ws),
                          "--task", task,
+                         *( ["--task-spec", str(child_task_spec)]
+                            if child_task_spec is not None else [] ),
                          "--params", json.dumps(params or {}),
                          "--out-dir", str(run_dir),
                          "--max-seconds", str(max_seconds)],
@@ -302,6 +335,8 @@ def run_candidate(files: dict, params: dict | None = None, *, run_dir: Path,
     report["tree"] = art.tree
     report["static"] = meta
     report["dependencies"] = dep_report
+    report["experiment_spec"] = experiment.to_dict()
+    report["execution"] = execution.to_dict()
     report["isolation"] = sb.backend
     report["run_dir"] = str(run_dir)
     report["dev_scores"] = str(run_dir / "dev_scores.npy")

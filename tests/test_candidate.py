@@ -208,6 +208,84 @@ if "seatbelt" in results:
     check("the victim's scores survive the seatbelt attempt",
           results["seatbelt_intact"] is True)
 
+# 5a -- an unhonourable metric cutoff is refused, not silently substituted ------
+# candidate_runner rebinds contract.primary to the active TaskSpec's metric. That wrapper
+# accepted k and dropped it, so a candidate early-stopping on nDCG@10 silently received the
+# nDCG@5 number (0.5429 vs 0.4463 on a synthetic split -- and on the official task, since the
+# wrapper is installed for every task). No seed passes k, so nothing caught it.
+_k_tree = dict(C.seed_tree(C.workspace_for("minimal")))
+_k_tree["train.py"] = _k_tree["train.py"].replace(
+    "dev_m = primary(udev, ydev, m.predict(Xdev))",
+    "dev_m = primary(udev, ydev, m.predict(Xdev), k=10)")
+check("the k-probe fixture actually asks for a different cutoff",
+      "k=10" in _k_tree["train.py"])
+_k_rep = C.run_candidate(_k_tree, {}, run_dir=TMP / "kprobe", backend="none",
+                         max_seconds=300)
+check("a cutoff the task metric cannot honour is REFUSED, not silently substituted",
+      _k_rep.get("ok") is False and "cannot honour k=10" in str(_k_rep.get("error")),
+      f"ok={_k_rep.get('ok')} err={str(_k_rep.get('error'))[:80]}")
+check("the refusal is a contract violation the coder can act on",
+      _k_rep.get("error_type") == "ContractError", str(_k_rep.get("error_type")))
+# CONTROL: the same seed WITHOUT the k argument still runs, so the probe is specific.
+_ctl_rep = C.run_candidate(dict(C.seed_tree(C.workspace_for("minimal"))), {},
+                           run_dir=TMP / "kprobe_ctl", backend="none", max_seconds=600)
+check("CONTROL: the unmodified seed still runs (the refusal is not blanket)",
+      _ctl_rep.get("ok") is True, str(_ctl_rep.get("error"))[:80])
+
+# 5b -- a candidate cannot edit its OWN content-addressed source ---------------
+# agent/candidate.py executes the artifact source directly and says "a candidate cannot
+# edit its own source". That invariant had no test: a second copy under run_dir once made
+# it false, because run_dir is deliberately the sandbox's write allowance. Deliberately
+# NOT run under backend="none" -- an unsandboxed self-edit would corrupt the artifact
+# store it is asserting about.
+def self_edit_tree(rel: str) -> dict:
+    return trivial_train(
+        f"    import pathlib\n"
+        f"    t = pathlib.Path(__file__).resolve().parent / {rel!r}\n"
+        f"    try:\n"
+        f"        t.write_text('SELF-EDITED')\n"
+        f"        raise RuntimeError('ATTACK-SUCCEEDED')\n"
+        f"    except (PermissionError, OSError) as e:\n"
+        f"        raise RuntimeError('ATTACK-BLOCKED: ' + type(e).__name__)")
+
+
+def tmp_write_tree() -> dict:
+    return trivial_train(
+        "    import pathlib, tempfile\n"
+        "    t = pathlib.Path(tempfile.gettempdir()) / 'track2_probe_control.txt'\n"
+        "    try:\n"
+        "        t.write_text('ok')\n"
+        "        raise RuntimeError('ATTACK-SUCCEEDED')\n"
+        "    except (PermissionError, OSError) as e:\n"
+        "        raise RuntimeError('ATTACK-BLOCKED: ' + type(e).__name__)")
+
+
+if I.available().get("seatbelt", "x") == "":
+    rep_self = C.run_candidate(self_edit_tree("model.py"), {},
+                               run_dir=TMP / "selfedit", backend="seatbelt",
+                               max_seconds=300)
+    err_self = str(rep_self.get("error") or "")
+    tree_self = rep_self.get("tree") or ""
+    check("seatbelt BLOCKS a candidate writing over its own source",
+          "ATTACK-BLOCKED" in err_self, err_self[:90])
+    still_ok = False
+    try:
+        AR.verify(tree_self)
+        still_ok = True
+    except Exception as e:
+        still_ok = f"{type(e).__name__}: {e}"
+    check("the artifact tree still verifies after the self-edit attempt",
+          still_ok is True, str(still_ok))
+    # CONTROL: the same write pattern must SUCCEED somewhere permitted, otherwise the
+    # block above could just be "writes never work in this sandbox".
+    rep_ctl = C.run_candidate(tmp_write_tree(), {}, run_dir=TMP / "selfedit_ctl",
+                              backend="seatbelt", max_seconds=300)
+    check("CONTROL: the same candidate CAN write to a permitted path under seatbelt",
+          "ATTACK-SUCCEEDED" in str(rep_ctl.get("error") or ""),
+          str(rep_ctl.get("error"))[:90])
+else:
+    print(f"  [skip] seatbelt unavailable: {I.available().get('seatbelt')}")
+
 # 6 -- a relative sandbox path is refused, not silently granted ----------------
 try:
     I.seatbelt_profile([], [], [Path("runs/relative")])

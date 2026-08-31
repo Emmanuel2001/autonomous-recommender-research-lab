@@ -56,11 +56,11 @@ from agent import candidate as CAND            # noqa: E402
 from agent.research_state import Experiment, ResearchState   # noqa: E402
 from core import artifacts as AR               # noqa: E402
 from core import budgets as BUD                # noqa: E402
+from core import execution as EXEC             # noqa: E402
 # OFFICIAL_TEST is deliberately NOT imported here. The code-first driver has no legitimate
 # use for any test figure, and not importing it makes that checkable by grep rather than by
 # reading every line.
-from core.metrics import (OFFICIAL_EPSILON, OFFICIAL_N,  # noqa: E402
-                          OFFICIAL_VALID, primary as official_primary)
+from core.metrics import OFFICIAL_EPSILON, OFFICIAL_N  # noqa: E402
 
 #: Repair attempts per hypothesis. Bounded because an agent that cannot fix its own code in
 #: three tries is not converging on a fix, and each attempt costs a fit.
@@ -217,6 +217,33 @@ LANE_TO_STAGE = {
 }
 
 
+#: A summary record must fit inside core.scorer.MAX_RECORD_BYTES (12288). Each summary was
+#: capped at 1800 chars but the COUNT was not, so seven or more in one call pushed the body
+#: past the cap -- and an oversized record is REFUSED, which the caller used to discard by
+#: ignoring rec()'s return value. The console would then be silently missing the very
+#: decisions it exists to show. Module-level and pure so the bound is testable; the previous
+#: version lived in a closure, which is why the suite claimed "bounded" without checking it.
+THOUGHT_TOTAL_BUDGET = 6000
+THOUGHT_MAX_ITEMS = 6
+THOUGHT_ITEM_CHARS = 1800
+
+
+def bound_thought_summaries(raw) -> tuple[list[str], int]:
+    """Return (summaries that fit, how many were dropped)."""
+    # isinstance, not str(): str(None) is "None", which is truthy, so a provider
+    # returning a null in this list recorded the literal text "None" as a summary.
+    items = [s.strip() for s in (raw or []) if isinstance(s, str) and s.strip()]
+    kept, used, dropped = [], 0, 0
+    for item in items:
+        item = item[:THOUGHT_ITEM_CHARS]
+        if len(kept) >= THOUGHT_MAX_ITEMS or used + len(item) > THOUGHT_TOTAL_BUDGET:
+            dropped += 1
+            continue
+        kept.append(item)
+        used += len(item)
+    return kept, dropped
+
+
 def candidate_to_plan(cand: dict) -> dict:
     """The selected tournament candidate, in the shape the coder and recorder expect."""
     return {
@@ -274,8 +301,8 @@ def merge_tree(parent: dict, edits: list) -> tuple[dict, list]:
     return child, sorted(changed)
 
 
-def harness_metrics(splits, run_dir: Path) -> dict:
-    """Train and dev ranking metrics, computed HERE with the official metric.
+def harness_metrics(splits, spec, run_dir: Path) -> dict:
+    """Train and dev metrics, computed HERE with the task-owned metric.
 
     Not self-reported. The candidate returns score vectors; the labels for train and dev
     are in this process; so the train/dev gap -- the thing this project previously could
@@ -285,12 +312,21 @@ def harness_metrics(splits, run_dir: Path) -> dict:
     idx = np.load(run_dir / "train_subset_index.npy")
     sub = np.load(run_dir / "train_subset_scores.npy")
     tr = splits["train"]
-    tm = official_primary(tr.user_id[idx], tr.label[idx], sub)
+    group_name = spec.metric.group_by
+    tg = getattr(tr, group_name)[idx] if group_name else None
+    tm = spec.metric.fn(tg, tr.label[idx], sub)
     dv = np.load(run_dir / "dev_scores.npy")
-    va = splits["valid"]
-    dm = official_primary(va.user_id, va.label, dv)
+    va = splits[spec.split.dev_split]
+    vg = getattr(va, group_name) if group_name else None
+    dm = spec.metric.fn(vg, va.label, dv)
+    pk = spec.metric.primary_key
+    # The state/report schema calls the decision value "primary" for every task. Preserve
+    # the task's native key as well, so a global-AUC task carries both auc and primary.
+    tm, dm = dict(tm), dict(dm)
+    tm.setdefault("primary", float(tm[pk]))
+    dm.setdefault("primary", float(dm[pk]))
     return {"train": tm, "dev": dm,
-            "gap": round(tm["primary"] - dm["primary"], 6),
+            "gap": round(float(tm[pk]) - float(dm[pk]), 6),
             "train_rows": int(idx.size), "train_users": int(tm.get("users", 0))}
 
 
@@ -340,7 +376,9 @@ def research_loop(*, agent, splits, edges, spec, state: ResearchState, budget: B
                   seed_files: dict | None = None, seed_note: str = "",
                   policy: str = "tournament", tournament_size: int = 6,
                   workspace: Path | None = None,
-                  max_coverage_repairs: int = 1) -> dict:
+                  max_coverage_repairs: int = 1,
+                  execution_profile=None,
+                  task_spec_path: str | Path | None = None) -> dict:
     """Run the loop. `rec` and `score` are injected so this is testable against a fake
     scorer as well as the real one.
 
@@ -350,6 +388,31 @@ def research_loop(*, agent, splits, edges, spec, state: ResearchState, budget: B
     def say(msg: str) -> None:
         if verbose:
             print(msg, flush=True)
+
+    def record_public_thoughts(role: str, usage: dict, iteration: int, stage: str) -> None:
+        """Record provider-authored summaries when available, never hidden reasoning."""
+        summaries, dropped = bound_thought_summaries(usage.get("thought_summaries"))
+        if not summaries:
+            return
+        body = {"run_id": run_id, "iteration": iteration,
+                "what": "llm_thought_summary", "role": role, "stage": stage,
+                "model": usage.get("model"), "summaries": summaries,
+                "thinking_tokens": usage.get("thinking_tokens", 0),
+                "note": "provider-generated public summary; not chain-of-thought"}
+        if dropped:
+            body["summaries_omitted_for_record_size"] = dropped
+        ok, entry = rec("event", body)
+        if not ok:
+            # Not fatal -- summaries are commentary, not evidence -- but never silent.
+            say(f"       note: thought-summary record refused ({entry}); "
+                f"{len(summaries)} summarie(s) not recorded")
+
+    # Convergence and the reference point belong to the task contract.  The official
+    # constants remain the backwards-compatible default for historical callers, but a
+    # portable task must never silently inherit KuaiRand's stopping rule or baseline.
+    conv_epsilon = float(spec.convergence.get("epsilon", OFFICIAL_EPSILON))
+    conv_n = int(spec.convergence.get("N", OFFICIAL_N))
+    baseline_valid = spec.baseline.get(spec.split.dev_split)
 
     stats = {"planned": 0, "refused": 0, "duplicate": 0, "registered": 0,
              "evaluated": 0, "failed": 0, "repaired": 0, "promoted": 0,
@@ -386,14 +449,16 @@ def research_loop(*, agent, splits, edges, spec, state: ResearchState, budget: B
         raise SystemExit(f"the seed candidate could not be pre-registered: {entry}. "
                          f"Nothing is run unrecorded, so the run stops here.")
     rep = CAND.run_candidate(seed_files, {}, run_dir=seed_dir, task=spec_task(spec),
-                             backend=backend, max_seconds=max_seconds, workspace=ws)
+                             backend=backend, max_seconds=max_seconds, workspace=ws,
+                             execution_profile=execution_profile,
+                             task_spec_path=task_spec_path)
     if not rep.get("ok"):
         raise SystemExit(f"the seed candidate failed to run: "
                          f"{rep.get('error_type')}: {rep.get('error')}")
     sok, spay = score(rep["dev_scores"], seed_art.tree)
     if not sok:
         raise SystemExit(f"the scorer refused the seed candidate: {spay}")
-    hm = harness_metrics(splits, rep["run_dir"])
+    hm = harness_metrics(splits, spec, rep["run_dir"])
     seed_exp = Experiment(
         iteration=0, tree=seed_art.tree, parent=None,
         # Must carry the override too. The signed PROPOSAL discloses it, but state.json and
@@ -405,6 +470,7 @@ def research_loop(*, agent, splits, edges, spec, state: ResearchState, budget: B
         stage="config", files_changed=[], signed=spay,
         train_primary=hm["train"]["primary"], dev_primary=hm["dev"]["primary"],
         gap=hm["gap"], outcome="promoted", wall_seconds=rep.get("total_seconds"))
+    seed_exp.execution = rep.get("execution")
     state.add(seed_exp)
     state.promote(seed_exp)
     state.diagnostics["seed_baseline"] = {
@@ -412,7 +478,8 @@ def research_loop(*, agent, splits, edges, spec, state: ResearchState, budget: B
         "harness_dev_primary": hm["dev"]["primary"],
         "harness_train_primary": hm["train"]["primary"],
         "train_dev_gap": hm["gap"],
-        "official_baseline_valid": OFFICIAL_VALID.get("fm_official"),
+        "official_baseline_valid": baseline_valid,
+        "declared_baseline_valid": baseline_valid,
         # The published TEST baseline is deliberately NOT put in front of the agent. It is a
         # number the organisers printed, not a measurement of our predictions, so including
         # it leaks nothing -- but the agent has no legitimate use for any test figure, and
@@ -424,7 +491,7 @@ def research_loop(*, agent, splits, edges, spec, state: ResearchState, budget: B
     # The seed candidate is scored every run, so reproduction is MEASURED per run rather
     # than asserted from a test that ran once. Tolerance is 1e-6: the scorer rounds to 6dp.
     seed_p = spay["metrics"]["primary"]
-    ref = OFFICIAL_VALID.get("fm_official")
+    ref = baseline_valid
     repro = {"seed_signed_primary": seed_p,
              "published_baseline_valid": ref,
              "delta": None if ref is None else round(seed_p - ref, 6),
@@ -436,7 +503,7 @@ def research_loop(*, agent, splits, edges, spec, state: ResearchState, budget: B
     say(f"[research] seed: signed dev primary {seed_p:.6f} "
         f"(train {hm['train']['primary']:.6f}, gap {hm['gap']:+.4f})")
 
-    best_window = deque([spay["metrics"]["primary"]], maxlen=OFFICIAL_N + 1)
+    best_window = deque([spay["metrics"]["primary"]], maxlen=conv_n + 1)
     converged = None
     tree_cache: dict[str, dict] = {seed_art.tree: seed_files}
     telem_cache: dict[str, dict] = {}
@@ -469,7 +536,7 @@ def research_loop(*, agent, splits, edges, spec, state: ResearchState, budget: B
             # it after three evaluations is being actively misinformed.
             rem = budget.remaining()
             wgain = (best_window[-1] - best_window[0]) if len(best_window) > 1 else 0.0
-            until_check = max(0, (OFFICIAL_N + 1) - len(best_window))
+            until_check = max(0, (conv_n + 1) - len(best_window))
             state.budget = {
                 "max_iterations": budget.max_iterations,
                 "iterations_done": budget.iterations_done,
@@ -477,12 +544,12 @@ def research_loop(*, agent, splits, edges, spec, state: ResearchState, budget: B
                 "wall_seconds_remaining": round(rem["wall_seconds"]),
                 "convergence": {
                     "mode": convergence,
-                    "epsilon": OFFICIAL_EPSILON, "N": OFFICIAL_N,
+                    "epsilon": conv_epsilon, "N": conv_n,
                     "window_gain_so_far": round(wgain, 6),
                     "iterations_until_next_check": until_check,
                     "cumulative_gain_still_needed_to_survive_the_check":
                         (None if convergence != "official"
-                         else round(max(0.0, OFFICIAL_EPSILON - wgain), 6)),
+                         else round(max(0.0, conv_epsilon - wgain), 6)),
                     "note": ("the window measures CUMULATIVE champion gain, so two "
                              "sub-epsilon improvements inside it are enough to continue"
                              if convergence == "official" else
@@ -516,6 +583,7 @@ def research_loop(*, agent, splits, edges, spec, state: ResearchState, budget: B
                         it.add_tokens(usage.get("input_tokens", 0),
                                       usage.get("output_tokens", 0),
                                       usage.get("thinking_tokens", 0))
+                        record_public_thoughts("plan", usage, it_no, "tournament")
                         cands, cov = validate_tournament(traw, tournament_size)
                         if cov["lane_coverage_ok"]:
                             break
@@ -554,6 +622,7 @@ def research_loop(*, agent, splits, edges, spec, state: ResearchState, budget: B
                         it.add_tokens(usage.get("input_tokens", 0),
                                       usage.get("output_tokens", 0),
                                       usage.get("thinking_tokens", 0))
+                        record_public_thoughts("judge", usage, it_no, "judge")
                         jproblems = validate_judge(cands, verdict)
                         if not jproblems:
                             break
@@ -615,6 +684,7 @@ def research_loop(*, agent, splits, edges, spec, state: ResearchState, budget: B
                     it.add_tokens(usage.get("input_tokens", 0),
                                   usage.get("output_tokens", 0),
                                   usage.get("thinking_tokens", 0))
+                    record_public_thoughts("plan", usage, it_no, "plan")
             except Exception as e:
                 stats["infra_events"] += 1
                 rec("event", {"run_id": run_id, "iteration": it_no,
@@ -662,6 +732,7 @@ def research_loop(*, agent, splits, edges, spec, state: ResearchState, budget: B
                     it.add_tokens(usage.get("input_tokens", 0),
                                   usage.get("output_tokens", 0),
                                   usage.get("thinking_tokens", 0))
+                    record_public_thoughts("code", usage, it_no, "code")
                 except Exception as e:
                     stats["infra_events"] += 1
                     rec("event", {"run_id": run_id, "iteration": it_no,
@@ -752,7 +823,9 @@ def research_loop(*, agent, splits, edges, spec, state: ResearchState, budget: B
                 with it.stage("fit"):
                     rep = CAND.run_candidate(child, {}, run_dir=cdir,
                                              task=spec_task(spec), backend=backend,
-                                             max_seconds=max_seconds, workspace=ws)
+                                             max_seconds=max_seconds, workspace=ws,
+                                             execution_profile=execution_profile,
+                                             task_spec_path=task_spec_path)
                 state.note_seen(tree, it_no)
                 tree_cache[tree] = child
 
@@ -766,7 +839,8 @@ def research_loop(*, agent, splits, edges, spec, state: ResearchState, budget: B
                                   "error_line": rep.get("error_line"),
                                   "error_in": rep.get("error_in"),
                                   "contract_violation": rep.get("contract_violation"),
-                                  "isolation": rep.get("isolation")})
+                                  "isolation": rep.get("isolation"),
+                                  "execution": rep.get("execution")})
                     say(f"       FIT FAILED [{rep.get('error_type')}] at "
                         f"{rep.get('error_frame')}: {str(rep.get('error'))[:130]}")
                     error_ctx = {"phase": "execution",
@@ -813,7 +887,7 @@ def research_loop(*, agent, splits, edges, spec, state: ResearchState, budget: B
                     say(f"       scorer REFUSED: {str(spay)[:160]}")
                     break
 
-                hm = harness_metrics(splits, rep["run_dir"])
+                hm = harness_metrics(splits, spec, rep["run_dir"])
                 # The harness and the scorer compute the SAME metric on the SAME rows, so
                 # they must agree. A disagreement means the predictions and the labels are
                 # not aligned, whose only other symptom is a slightly low score.
@@ -860,6 +934,7 @@ def research_loop(*, agent, splits, edges, spec, state: ResearchState, budget: B
                     signed=spay, train_primary=hm["train"]["primary"],
                     dev_primary=hm["dev"]["primary"], gap=hm["gap"],
                     repairs=attempt, wall_seconds=rep.get("total_seconds"),
+                    execution=rep.get("execution"),
                     delta_vs_parent=None if parent_p is None else round(p - parent_p, 6),
                     delta_vs_champion=round(p - state.champion_primary, 6))
                 stats["evaluated"] += 1
@@ -867,7 +942,7 @@ def research_loop(*, agent, splits, edges, spec, state: ResearchState, budget: B
                           "dev_primary": hm["dev"]["primary"], "gap": hm["gap"],
                           "delta_vs_champion": exp.delta_vs_champion,
                           "repairs": attempt, "fit_seconds": rep.get("fit_seconds"),
-                          "telemetry": tel}
+                          "telemetry": tel, "execution": rep.get("execution")}
                 say(f"       signed dev primary {p:.6f} "
                     f"({exp.delta_vs_champion:+.6f} vs champion), "
                     f"train {hm['train']['primary']:.6f}, gap {hm['gap']:+.4f}")
@@ -911,6 +986,7 @@ def research_loop(*, agent, splits, edges, spec, state: ResearchState, budget: B
                     it.add_tokens(usage.get("input_tokens", 0),
                                   usage.get("output_tokens", 0),
                                   usage.get("thinking_tokens", 0))
+                    record_public_thoughts("reflect", usage, it_no, "reflect")
                     exp.reflection = refl
                     # Structured beliefs, keyed by MECHANISM, so the next tournament reasons
                     # over conclusions rather than re-reading prose. The supporting and
@@ -963,12 +1039,12 @@ def research_loop(*, agent, splits, edges, spec, state: ResearchState, budget: B
 
             # ---- convergence, on the organisers' rule
             best_window.append(state.champion_primary)
-            if convergence == "official" and len(best_window) > OFFICIAL_N:
+            if convergence == "official" and len(best_window) > conv_n:
                 gain = best_window[-1] - best_window[0]
-                if gain <= OFFICIAL_EPSILON:
+                if gain <= conv_epsilon:
                     converged = (f"converged: the validation best improved by "
-                                 f"{gain:+.6f} over {OFFICIAL_N} iterations, which does "
-                                 f"not exceed epsilon={OFFICIAL_EPSILON}")
+                                 f"{gain:+.6f} over {conv_n} iterations, which does "
+                                 f"not exceed epsilon={conv_epsilon}")
 
     return {"stats": stats, "converged": converged, "budget": budget.summary()}
 
@@ -1034,13 +1110,28 @@ def build_parser() -> argparse.ArgumentParser:
                     help="backend-specific model id; each backend has its own default")
     ap.add_argument("--effort", default="high")
     ap.add_argument("--thinking-level", default=None)
+    ap.add_argument("--thought-summaries", action="store_true",
+                    help="request provider-generated public thought summaries when the "
+                         "backend supports them; never exposes hidden chain-of-thought")
     ap.add_argument("--isolation", default="seatbelt",
                     choices=["seatbelt", "docker", "subprocess", "none"])
     ap.add_argument("--fit-seconds", type=float, default=1800.0,
                     help="per-candidate timeout inside the sandbox")
+    ap.add_argument("--framework", default="auto", choices=list(EXEC.FRAMEWORKS),
+                    help="operator execution constraint; auto infers NumPy or torch from "
+                         "the candidate source")
+    ap.add_argument("--device", default="auto", choices=list(EXEC.DEVICES),
+                    help="numerical device for candidates: auto, cpu, Apple mps, or cuda")
+    ap.add_argument("--accelerator-policy", default="prefer",
+                    choices=list(EXEC.ACCELERATOR_POLICIES),
+                    help="off/allow/prefer/require accelerator use for torch candidates")
+    ap.add_argument("--no-device-fallback", action="store_true",
+                    help="refuse a candidate when its requested device is unavailable")
     ap.add_argument("--max-repairs", type=int, default=MAX_REPAIRS)
     ap.add_argument("--convergence", default="official", choices=["official", "off"])
     ap.add_argument("--task", default="kuairand_pure")
+    ap.add_argument("--task-spec", default=None,
+                    help="confirmed portable JSON task specification; overrides --task")
     ap.add_argument("--run-name", default=None)
     ap.add_argument("--research-policy", default="tournament",
                     choices=["tournament", "single"],
@@ -1058,12 +1149,14 @@ def build_parser() -> argparse.ArgumentParser:
                          "incomplete, or a judge response is invalid. After the bound the "
                          "iteration is abandoned WITHOUT coding, fitting or scoring.")
     ap.add_argument("--seed-profile", default="inherited",
-                    choices=["inherited", "minimal"],
+                    choices=["inherited", "minimal", "accelerated"],
                     help="'inherited' is research_workspace/, which contains a prepared "
                          "pairwise switch and is required to reproduce the recorded runs. "
                          "'minimal' is research_workspace_minimal/: the pointwise official "
                          "baseline only, with no pairwise, listwise or alternative "
-                         "architecture supplied, so a ranking objective must be written.")
+                         "architecture supplied, so a ranking objective must be written; "
+                         "'accelerated' is an explicitly non-official PyTorch FM seed for "
+                         "CPU/MPS/CUDA execution research.")
     ap.add_argument("--planner-model", default=None,
                     help="model for hypothesis generation; falls back to --model")
     ap.add_argument("--judge-model", default=None,
@@ -1118,18 +1211,18 @@ def main() -> None:
 
     from core.handshake import (HandshakeError, require_same_data, require_task,
                                require_verified_chain)
-    from core.official_data import load_for_strategy
     from core.scorer import request
-    from core.task import get as get_task
+    from core.task import load as get_task
 
     t0 = time.time()
     run_id = (a.run_name
               or f"research_{a.backend}_{str(a.model or 'default').replace('/', '_')}"
                  f"_{int(t0)}")
 
+    spec = get_task(a.task_spec or a.task)
     ping = request({"op": "ping"})
     try:
-        require_task(ping, "official")
+        require_task(ping, spec.slug if a.task_spec else "official")
         require_verified_chain(ping)
     except HandshakeError as e:
         raise SystemExit(str(e)) from None
@@ -1137,29 +1230,47 @@ def main() -> None:
           f"manifest {str(ping.get('manifest_sha256',''))[:16]} "
           f"ledger {Path(str(ping.get('ledger') or '?')).name}")
 
-    spec = get_task(a.task)
-    splits, edges = load_for_strategy()
-    if splits["test"].label is not None:
-        raise SystemExit("refusing to run: test labels reached the driver")
-    print(f"[research] train {len(splits['train']):,} / valid {len(splits['valid']):,} "
-          f"rows; test labels absent from this process")
+    splits, edges = spec.loader()
+    held = spec.split.held_out_split
+    dev = spec.split.dev_split
+    if splits[held].label is not None:
+        raise SystemExit(f"refusing to run: {held} labels reached the driver")
+    print(f"[research] train {len(splits['train']):,} / {dev} {len(splits[dev]):,} "
+          f"rows; {held} labels absent from this process")
+
+    execution_profile = EXEC.ExecutionProfile(
+        framework=a.framework, device=a.device,
+        accelerator_policy=a.accelerator_policy,
+        allow_fallback=not a.no_device_fallback,
+        max_fit_seconds=a.fit_seconds)
+    capabilities = EXEC.public_capabilities()
+    print(f"[research] execution framework={a.framework} device={a.device} "
+          f"policy={a.accelerator_policy}; "
+          f"mps={capabilities['mps']['available']} "
+          f"cuda={capabilities['cuda']['available']}")
 
     budget = BUD.Budget(max_iterations=a.iterations,
                         max_wall_seconds=a.max_wall_seconds,
                         max_tokens=a.max_tokens)
     state = ResearchState(
-        task={"name": a.task, "metric": "primary = mean(GAUC, nDCG@5)",
+        task={"name": spec.slug, "metric": spec.metric.name,
               "label": spec.label,
-              "framing": "within-user ranking of each user's own logged impressions; "
-                         "NOT full-catalogue retrieval",
+              "framing": spec.title,
+              "group_by": spec.metric.group_by,
               "dev_split": spec.split.dev_split,
               "held_out_split": spec.split.held_out_split,
-              "official_baseline_valid_primary": OFFICIAL_VALID.get("fm_official"),
-              "convergence": {"epsilon": OFFICIAL_EPSILON, "N": OFFICIAL_N}},
+              "official_baseline_valid_primary": spec.baseline.get(dev),
+              "declared_baseline_valid_primary": spec.baseline.get(dev),
+              "convergence": dict(spec.convergence),
+              "execution_profile": execution_profile.to_dict(),
+              "hardware_capabilities": capabilities},
         budget={"max_iterations": a.iterations, "max_wall_seconds": a.max_wall_seconds})
 
     ws = CAND.workspace_for(a.seed_profile)
     provenance = CAND.profile_provenance(a.seed_profile)
+    if not provenance.get("official_numpy_seed") and not seed_note:
+        seed_note = ("accelerated PyTorch reference profile; this is NOT the byte-identical "
+                     "official NumPy baseline")
     print(f"[research] seed profile {a.seed_profile!r} ({ws.name}): "
           f"pairwise_present={provenance['pairwise_code_present']} "
           f"listwise_present={provenance['listwise_code_present']} "
@@ -1169,6 +1280,7 @@ def main() -> None:
     from agent.research_agent import ResearchAgent
     agent = ResearchAgent(backend=a.backend, model=a.model, effort=a.effort,
                           thinking_level=a.thinking_level,
+                          thinking_summaries=a.thought_summaries,
                           planner_model=a.planner_model, judge_model=a.judge_model,
                           coder_model=a.coder_model, reflector_model=a.reflector_model)
     print(f"[research] policy={a.research_policy}"
@@ -1186,25 +1298,30 @@ def main() -> None:
         return True, r["entry"]["seq"]
 
     def score(path: str, tree: str):
-        r = request({"op": "score_official", "scores": str(path), "split": "valid",
+        r = request({"op": "score_task" if a.task_spec else "score_official",
+                     "scores": str(path), "split": dev,
                      "config_hash": tree, "isolation": a.isolation,
                      "kind": "score"})
         if not r.get("ok"):
             return False, r.get("error")
         pl = r["entry"]["payload"]
         try:
-            require_same_data(splits["valid"].content_sha256(),
-                              pl.get("split_content_sha256"), "valid")
+            require_same_data(splits[dev].content_sha256(),
+                              pl.get("split_content_sha256"), dev)
         except HandshakeError as e:
             return False, str(e)
         return True, pl
 
     ok, seq = rec("run_start", {
-        "run_id": run_id, "task": a.task, "driver": "research_driver",
+        "run_id": run_id, "task": spec.slug, "driver": "research_driver",
+        "task_spec_path": str(Path(a.task_spec).resolve()) if a.task_spec else None,
         "mode": "code_first", "backend": a.backend, "model": agent.model,
         "effort": a.effort, "thinking_level": a.thinking_level,
+        "thought_summaries_requested": a.thought_summaries,
         "isolation": a.isolation, "max_iterations": a.iterations,
         "max_wall_seconds": a.max_wall_seconds,
+        "execution_profile": execution_profile.to_dict(),
+        "hardware_capabilities": capabilities,
         "contract_sha256": CAND.contract_sha256(ws),
         "research_policy": a.research_policy,
         "tournament_size": (a.tournament_size if a.research_policy == "tournament" else 0),
@@ -1212,8 +1329,10 @@ def main() -> None:
         "seed_profile": a.seed_profile,
         "seed_provenance": provenance,
         "seed_config_overrides": (json.loads(a.seed_config) if a.seed_config else None),
-        "starts_from_official_baseline": not bool(a.seed_config),
-        "convergence": {"epsilon": OFFICIAL_EPSILON, "N": OFFICIAL_N,
+        "starts_from_official_baseline": (not bool(seed_note)
+                                           and provenance.get("official_numpy_seed", False)),
+        "convergence": {"epsilon": float(spec.convergence.get("epsilon", OFFICIAL_EPSILON)),
+                        "N": int(spec.convergence.get("N", OFFICIAL_N)),
                         "mode": a.convergence},
         "started_epoch": t0})
     if not ok:
@@ -1227,7 +1346,8 @@ def main() -> None:
             convergence=a.convergence, max_repairs=a.max_repairs,
             seed_files=seed_files, seed_note=seed_note,
             policy=a.research_policy, tournament_size=a.tournament_size,
-            workspace=ws, max_coverage_repairs=a.max_coverage_repairs)
+            workspace=ws, max_coverage_repairs=a.max_coverage_repairs,
+            execution_profile=execution_profile, task_spec_path=a.task_spec)
     finally:
         state.save(state_path)
 
@@ -1239,14 +1359,20 @@ def main() -> None:
                     "beliefs": state.beliefs,
                     "seed_profile": a.seed_profile,
                     "research_policy": a.research_policy,
+                    "execution_profile": execution_profile.to_dict(),
+                    "hardware_capabilities": capabilities,
                     "manual_interventions": state.manual_interventions})
     state.save(state_path)
 
     print("\n[research] ================= run complete =================")
     print(f"  champion tree      {str(state.champion['tree'])[:12]} "
           f"at dev primary {state.champion['primary']:.6f}")
-    print(f"  vs official base   "
-          f"{state.champion['primary'] - OFFICIAL_VALID['fm_official']:+.6f}")
+    declared_baseline = spec.baseline.get(dev)
+    if declared_baseline is not None:
+        print(f"  vs declared base   "
+              f"{state.champion['primary'] - float(declared_baseline):+.6f}")
+    else:
+        print("  vs declared base   unavailable (not provided by task spec)")
     print(f"  iterations         {out['budget']['iterations']}/"
           f"{out['budget']['max_iterations']}")
     print(f"  wall clock         {out['budget']['wall_hours']:.2f} h of "

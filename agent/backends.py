@@ -112,6 +112,19 @@ def extract_usage(resp: dict, backend: str) -> dict:
     return out
 
 
+def extract_thought_summaries(resp: dict) -> list[str]:
+    """Public provider summaries, never opaque signatures or hidden chain-of-thought."""
+    summaries = []
+    for step in resp.get("steps") or []:
+        if not isinstance(step, dict) or step.get("type") != "thought":
+            continue
+        for block in step.get("summary") or []:
+            if (isinstance(block, dict) and block.get("type") == "text"
+                    and isinstance(block.get("text"), str) and block["text"].strip()):
+                summaries.append(block["text"].strip())
+    return summaries
+
+
 # -------------------------------------------------------------------- backends
 class GeminiBackend:
     """Google AI Studio. Free tier, no billing required."""
@@ -119,15 +132,21 @@ class GeminiBackend:
     URL = "https://generativelanguage.googleapis.com/v1beta/interactions"
 
     def __init__(self, api_key: str, model: str = "gemini-3.5-flash-lite",
-                 thinking_level: str | None = None):
+                 thinking_level: str | None = None,
+                 thinking_summaries: bool = False):
         if not api_key:
             raise ValueError("GEMINI_API_KEY / TRACK2_LLM_API_KEY is empty")
         self.key, self.model, self.thinking = api_key, model, thinking_level
+        self.thinking_summaries = bool(thinking_summaries)
 
     def complete_json(self, system: str, user: str, schema: dict) -> tuple[dict, dict]:
         gen: dict = {}
         if self.thinking:
             gen["thinking_level"] = self.thinking
+        if self.thinking_summaries:
+            # Interactions API public reasoning summary. This is intentionally not the
+            # encrypted thought signature and does not expose private chain-of-thought.
+            gen["thinking_summaries"] = "auto"
         body = {
             "model": self.model,
             "system_instruction": system,
@@ -148,7 +167,9 @@ class GeminiBackend:
         if status and status != "completed":
             raise BackendError(f"interaction status={status!r}, not 'completed'; "
                                f"keys={sorted(resp)}")
-        return resp, extract_usage(resp, self.name)
+        usage = extract_usage(resp, self.name)
+        usage["thought_summaries"] = extract_thought_summaries(resp)
+        return resp, usage
 
     @staticmethod
     def text_of(resp: dict) -> str:
@@ -215,7 +236,7 @@ class OpenAICompatBackend:
 def make_backend(kind: str, **kw):
     if kind == "gemini":
         return GeminiBackend(kw["api_key"], kw.get("model") or "gemini-3.5-flash-lite",
-                             kw.get("thinking_level"))
+                             kw.get("thinking_level"), kw.get("thinking_summaries", False))
     if kind == "ollama":
         return OpenAICompatBackend(kw.get("base_url") or "http://localhost:11434/v1",
                                    kw.get("model") or "gpt-oss:20b", "")

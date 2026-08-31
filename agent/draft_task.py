@@ -21,11 +21,10 @@ The LLM cannot invent a metric. It picks from METRICS below, which are the ones 
 implemented. An agent that chooses its own metric chooses an easy one, and this is the
 same failure one step earlier -- so the drafter gets the same constraint the loop does.
 
-WHAT THIS DOES NOT DO: it does not make an arbitrary dataset trainable. core.official_data
-loads a KuaiRand-shaped table (its `Rows` has named columns), so a confirmed spec for a
-differently-shaped directory is a validated declaration, not yet a runnable task. Building
-the generic loader is real work and is not smuggled in here -- saying so is more useful
-than a spec that claims more than it delivers.
+WHAT CONFIRMATION DOES: it emits the portable JSON contract consumed by core.task.load,
+core.tabular_task and the separate scorer.  The supported family is deliberately bounded:
+CSV logged-impression binary ranking/classification with a declared integer time split.
+It is runnable on differently named columns; it is not a claim of arbitrary AutoML.
 """
 from __future__ import annotations
 
@@ -709,6 +708,39 @@ def render(draft: dict, v: dict) -> str:
     return "\n".join(L)
 
 
+def portable_config(draft: dict, data_dir: Path, validation: dict, *, goal: str,
+                    drafted_by: str, epsilon: float = 0.002, window: int = 3,
+                    baseline_valid: float | None = None) -> dict:
+    """Validated draft -> runnable, scorer-readable portable TaskSpec JSON."""
+    if not validation.get("ok"):
+        raise ValueError("cannot confirm a draft that did not validate")
+    if epsilon <= 0 or window < 1:
+        raise ValueError("epsilon must be positive and convergence window at least 1")
+    features = list(dict.fromkeys(
+        (draft.get("feature_cols") or [])
+        + [x for x in (draft.get("group_by"), draft.get("item_col")) if x]))
+    if not features:
+        raise ValueError("a runnable task needs at least one declared feature column")
+    cfg = {
+        "slug": draft["slug"], "title": draft["title"],
+        "data_dir": str(Path(data_dir).resolve()),
+        "files": list(draft["log_files"]), "label": draft["label"],
+        "time_col": draft["time_col"], "feature_cols": features,
+        "group_by": draft.get("group_by"), "item_col": draft.get("item_col"),
+        "outcome_columns": [draft["label"]],
+        "splits": draft["splits"], "metric": draft["metric"],
+        "convergence": {"epsilon": float(epsilon), "N": int(window),
+                        "source": "human-confirmed task setup"},
+        "baseline": ({"valid": float(baseline_valid)}
+                     if baseline_valid is not None else {}),
+        "setup": {"goal": goal, "drafted_by": drafted_by,
+                  "rationale": draft.get("rationale"),
+                  "validation_warnings": list(validation.get("warnings") or []),
+                  "validated_rows": (validation.get("evidence") or {}).get("rows")},
+    }
+    return cfg
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description="draft a TaskSpec from a data dir + a goal")
     ap.add_argument("data_dir")
@@ -721,6 +753,12 @@ def main() -> None:
                     help="write the spec. Without this, nothing is written -- a draft is "
                          "a proposal and a human confirms it exactly once.")
     ap.add_argument("--out", default=None)
+    ap.add_argument("--epsilon", type=float, default=0.002,
+                    help="confirmed convergence threshold for this task")
+    ap.add_argument("--window", type=int, default=3,
+                    help="confirmed convergence window N for this task")
+    ap.add_argument("--baseline-valid", type=float, default=None,
+                    help="optional declared validation baseline for signed deltas")
     a = ap.parse_args()
 
     d = Path(a.data_dir)
@@ -759,16 +797,18 @@ def main() -> None:
         return
     DRAFT_DIR.mkdir(parents=True, exist_ok=True)
     out = Path(a.out) if a.out else DRAFT_DIR / f"{draft['slug']}.json"
-    out.write_text(json.dumps({"draft": draft, "validation":
-                               {k: v[k] for k in ("problems", "warnings")},
-                               "evidence": {k: (sorted(x) if isinstance(x, set) else x)
-                                            for k, x in v["evidence"].items()},
-                               "drafted_by": src, "goal": a.goal},
-                              indent=1), encoding="utf-8")
+    out.parent.mkdir(parents=True, exist_ok=True)
+    cfg = portable_config(draft, d, v, goal=a.goal, drafted_by=src,
+                          epsilon=a.epsilon, window=a.window,
+                          baseline_valid=a.baseline_valid)
+    out.write_text(json.dumps(cfg, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    # Refuse to print "confirmed" until the exact bytes just written instantiate the same
+    # loader/scorer contract the research driver will use.
+    from core.task import load as load_task
+    confirmed = load_task(out)
     print(f"\n  confirmed -> {out}")
-    print("  NOTE: this is a validated declaration. core.official_data loads a "
-          "KuaiRand-shaped\n  table, so a spec for a differently-shaped directory is not "
-          "yet runnable.")
+    print(f"  RUNNABLE: {confirmed.slug} loaded with "
+          f"{confirmed.split.expect_rows}. Start scorer and driver with --task-spec.")
 
 
 if __name__ == "__main__":

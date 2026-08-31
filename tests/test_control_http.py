@@ -72,6 +72,10 @@ check("an empty token -> 403", st == 403, str(st))
 st, b, _h = req("GET", f"/?t={GOOD}")
 check("the right token -> 200", st == 200, str(st))
 check("dashboard renders the launch form", "Launch run" in b)
+check("dashboard exposes accelerator controls", all(x in b for x in
+      ("framework", "device", "accelerator policy")))
+check("dashboard exposes public thought-summary control", "thought_summaries" in b)
+check("dashboard exposes portable task spec control", "task_spec" in b)
 st, b, _h = req("GET", "/", headers={"X-Track2-Token": GOOD})
 check("token accepted in a header too", st == 200, str(st))
 
@@ -181,7 +185,16 @@ check("status is 200 JSON", st == 200 and "application/json" in h.get("Content-T
 j = json.loads(b)
 check("status reports idle", j["run"]["state"] == "idle", str(j))
 check("status reports the scorer as absent", j["scorer"] is False, str(j))
+check("status reports measured CPU/MPS/CUDA capabilities",
+      set(j["capabilities"]) >= {"cpu", "mps", "cuda"})
 check("status leaks no token", GOOD not in b)
+st, b, h = req("GET", f"/capabilities?t={GOOD}")
+check("capabilities endpoint is JSON", st == 200 and
+      "application/json" in h.get("Content-Type", ""))
+check("capabilities endpoint names actual devices",
+      set(json.loads(b)) >= {"cpu", "mps", "cuda"})
+st, _b, _h = req("GET", f"/events?ledger=nope&t={GOOD}")
+check("events endpoint refuses an unknown ledger", st == 404, str(st))
 
 print("== launching without a scorer is refused, and starts nothing")
 st, _b, h = req("POST", f"/launch?t={GOOD}",

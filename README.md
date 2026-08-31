@@ -19,7 +19,8 @@ recommender funnel, which is also where the organisers placed it.
 
 | | what it is | who wrote it |
 |---|---|---|
-| **the recommender** | a numpy Factorization Machine: embeddings, Adam, a loss, early stopping. No PyTorch, no GPU. | four files are agent-editable; **the submitted champion changed two of them** — see §8 |
+| **the submitted recommender** | a NumPy Factorization Machine: embeddings, Adam, a loss, early stopping. It is intentionally CPU-reproducible. | four files are agent-editable; **the submitted champion changed two of them** — see §8 |
+| **future candidates** | the same contract can also run agent-written PyTorch models on measured CPU, Apple MPS or NVIDIA CUDA devices. | agent-editable; this capability does not retroactively change the frozen result |
 | **the researcher** | the LLM. It never scores anything and never sees held-out labels. It reads results, forms hypotheses, and writes the recommender's source. | us, as a harness |
 
 The LLM is not the model. It is the thing that decides what the model should be.
@@ -33,7 +34,7 @@ plan / tournament → judge → code → diff → REGISTER → train → score �
 * **tournament** — several competing hypotheses, spanning six research lanes, of which at
   least one must be a `model_architecture` candidate and one a `sampling_training` candidate.
 * **judge** — ranks them on evidence, expected impact, novelty, information value, CPU
-  feasibility and implementation risk, picks **one**, and must state in writing why it passed
+  resource feasibility and implementation risk, picks **one**, and must state in writing why it passed
   over each architecture candidate.
 * **register** — the tournament, the judge's reasoning and the chosen hypothesis go into a
   signed hash-chained ledger **before any candidate code exists or runs**. If that record is
@@ -110,12 +111,13 @@ of what happened, not a claim that architecture does not matter.
 
 ## 10. The new capability
 
-Two seed profiles now exist:
+Three seed profiles now exist:
 
 | profile | contains | use |
 |---|---|---|
 | `inherited` (`research_workspace/`) | the prepared pairwise switch | reproducing the recorded runs |
 | `minimal` (`research_workspace_minimal/`) | **pointwise only** — no pairwise, no listwise, no alternative architecture | any ranking objective must be **written** by the agent |
+| `accelerated` (`research_workspace_accelerated/`) | PyTorch FM with pointwise/pairwise training and declared device execution | CPU/MPS/CUDA architecture and scale experiments; **not** the official NumPy baseline |
 
 `minimal` reproduces the official pointwise baseline **byte-identically** (verified: identical
 dev and held-out score vectors against `strategy/ranker.py` at `Config()` defaults), so it is
@@ -124,6 +126,49 @@ a like-for-like starting point and not a weaker one.
 Model routing is per role — `--planner-model`, `--judge-model`, `--coder-model`,
 `--reflector-model`, each falling back to `--model` and then the backend default — so a
 stronger model can carry the research decisions while a cheaper one writes routine code.
+
+## 10A. The platform is no longer tied to this laptop or this dataset
+
+**The submitted entry is, and remains, the NumPy CPU implementation.** Nothing below changes
+it: no accelerator, no PyTorch and no portable task participates in the frozen submission,
+which still reproduces exactly on CPU with NumPy alone. The platform around it grew; the
+entry did not move.
+
+* `core/execution.py` measures CPU, MPS and CUDA availability and resolves every candidate's
+  `ExperimentSpec` to one actual device. A fallback is recorded; strict mode refuses it. A
+  candidate may narrow an operator constraint in `config.json` but never widen one, because
+  that file is written by the LLM.
+* the accelerated PyTorch profile has completed a real fit end to end **on Apple MPS**: 11
+  epochs, `dev_primary_best` 0.602171, on `torch 2.11.0` under macOS 15.7.3 (arm64). That is
+  a portability check, not a result — it is a single seed and it is not compared against the
+  champion.
+* a confirmed portable JSON `TaskSpec` owns column names, CSV files, time splits, label,
+  metric, convergence and baseline. The same candidate and separate signed scorer have run
+  end to end on the included `shop_clicks_demo`, whose columns are `account_id`,
+  `product_id`, `context` and `converted` rather than KuaiRand's schema. This proves
+  **bounded CSV-recommender portability — not arbitrary AutoML**: the portable family is
+  limited to CSV logged-impression data with a time-ordered split and either within-user
+  ranking or global AUC. A task outside that shape needs new code, not just new JSON.
+* the local Research Console exposes hardware, task spec, role models, tournament policy,
+  budgets and accelerator policy. Its decision trace shows hypotheses, judge verdicts,
+  pre-registration, signed results, reflections and optional provider-generated public
+  thought summaries. It does **not** claim to reveal private chain-of-thought.
+
+### Which devices were actually exercised, and which were not
+
+Stated per device, because "supports CUDA" and "ran on CUDA" are different claims:
+
+| device / backend | status on this machine |
+|---|---|
+| **CPU (NumPy)** | **executed** — the reference path, the frozen entry, and every suite |
+| **CPU (PyTorch)** | **executed** — forward pass matches the NumPy FM to 2e-7 |
+| **Apple MPS** | **executed** — real forward pass, an optimiser loop that lowers the loss, and a full 11-epoch candidate fit |
+| **NVIDIA CUDA** | **never executed.** No CUDA hardware is present (`torch.cuda.is_available()` is false here). Only the *plan* is tested: `--gpus all` in the container argv, device forwarding, and the refusal raised when the CUDA image is absent |
+| **Docker** | **never executed.** The daemon does not respond on this machine. Only argv and mount construction are asserted — read-only candidate/workspace/task mounts and the container output path |
+
+These are platform capability tests, not new leaderboard evidence. **This engineering pass
+established no new leaderboard improvement.** The submitted champion, prediction file and
+signed historical ledgers are not rebuilt by it.
 
 ## 11. What real LLM runs have done, and what they have not
 
@@ -212,8 +257,11 @@ So the repository still separates a **capability** from the **behaviour** observ
   shows predicted and actual side by side rather than hiding it.
 * The train/dev gap is a **diagnostic**: the harness verifies the *size* of the returned
   train-subset vector but cannot verify which rows produced it.
-* Docker isolation is implemented but unexercised; the measured boundary is macOS seatbelt.
-* The history is **local only** — 13 commits, no remote and nothing pushed, by instruction.
+* Docker command construction (including read-only source mounts and CUDA passthrough) is
+  tested, but a real Docker daemon and CUDA device were unavailable on this Mac. The measured
+  local accelerated fit resolved to CPU; MPS/CUDA execution must be verified on a host that
+  reports either device available.
+* The history is **local only** — no remote and nothing pushed, by instruction.
   The dataset, credentials, fitted models and prediction vectors are excluded; the signed
   ledgers, the artifact store and the submitted prediction file are committed, because a
   reader who cannot check a hash against an artifact cannot check anything.

@@ -75,6 +75,9 @@ class Experiment:
     error: str = ""
     repairs: int = 0
     wall_seconds: float | None = None
+    #: Harness-resolved numerical backend. Unlike telemetry, this is measured outside the
+    #: candidate and says whether CPU, MPS or CUDA actually executed the experiment.
+    execution: dict | None = None
     delta_vs_parent: float | None = None
     delta_vs_champion: float | None = None
     reflection: dict | None = None

@@ -8,6 +8,7 @@ claim.
 ```
   ┌──────────────────────────────────────────────────────────────────────────┐
   │  agent/research_driver.py            the loop. Holds NO signing key.     │
+  │  TaskSpec fixes data / split / label / metric / stopping rule.           │
   │                                                                          │
   │  tournament ──▶ judge ──▶ code ──▶ diff ──▶ REGISTER ──▶ fit ──▶ score   │
   │      │            │         │        │          │          │       │     │
@@ -42,12 +43,14 @@ claim.
          │                   │  · no network                      │
          │                   │  · cannot read held-out labels     │
          │                   │  · cannot read the ledger or key   │
-         │                   │  · writes only its own directory   │
+         │                   │  · immutable source mounted/read   │
+         │                   │    outside its writable output     │
+         │                   │  · CPU / MPS / CUDA plan recorded  │
          │                   │  7/7 attacks blocked, measured     │
          │                   │  with a control arm that succeeds  │
          │                   └────────────────────────────────────┘
          ▼
-   research_workspace{,_minimal}/  the agent-editable strategy:
+   research_workspace{,_minimal,_accelerated}/  the agent-editable strategy:
      contract.py   IMMUTABLE — the interface, the metric helper, the train subsample
      features.py   agent-editable
      model.py      agent-editable   ← architecture lives here
@@ -65,6 +68,58 @@ claim.
 | **content-addressed** trees | two identical candidates are one artifact, lineage is a fact about the data, and `verify()` re-hashes stored bytes so a ledger can carry a hash instead of source |
 | the **kernel sandbox** | generated code runs against a dataset we are scored on. This is the precondition, not insurance |
 | held-out labels **absent from the process**, asserted on every load | the one invariant that cannot be relaxed without invalidating the submission |
+| `TaskSpec` owns data/split/metric/stopping | a new dataset can change the problem contract without allowing the LLM to reward-hack it |
+| `ExperimentSpec` resolves to measured CPU/MPS/CUDA | GPU use and fallback are evidence in the run, not prose or a machine-name assumption |
+
+## Runtime portability
+
+The official frozen candidate remains NumPy/CPU. New experiments may use the accelerated
+PyTorch profile:
+
+```
+candidate config/source ──▶ ExperimentSpec ──▶ capability probe
+                                                   │
+                         strict refusal ◀──────────┼── unavailable required device
+                                                   │
+                                                   ▼
+                                  CPU | Apple MPS | NVIDIA CUDA
+                                                   │
+                                                   ▼
+                              exact device + fallback in state and ledger
+```
+
+Native subprocess/seatbelt execution uses the host PyTorch runtime. Docker receives
+read-only candidate/workspace/task mounts; CUDA uses an operator-supplied CUDA image and
+`--gpus all`. MPS is refused under Docker rather than silently becoming CPU.
+
+This section describes the resolution *mechanism*, which is not a claim that every branch has
+run. CPU and Apple MPS have actually executed here; **CUDA and Docker have not** — only their
+argv, mounts and refusal paths are asserted. README §10A carries the per-device table.
+
+## Task portability
+
+`agent/draft_task.py` profiles CSV files and proposes a setup. A human confirms the immutable
+problem definition once. `core/tabular_task.py` then supplies both views of the same rows:
+
+* strategy loader: train/dev labels present, held-out label absent;
+* scorer loader: held-out labels present in the separate signing process;
+* sandbox root: held-out outcomes physically redacted; under seatbelt the original root is
+  kernel-denied, and under Docker it is not mounted.
+
+The included `shop_clicks_demo` exercises different user/item/label column names through the
+same NumPy candidate, PyTorch candidate and signed scorer. The supported family is explicit;
+adding a metric or data modality requires another reviewed adapter.
+
+## Research Console
+
+`agent/control.py` is a loopback-only operator console. It can launch one allowlisted run,
+display measured hardware and replay the signed research sequence. It separates:
+
+* LLM-authored hypotheses, judge verdicts, reflections and optional public thought summaries;
+* harness-derived diffs, execution telemetry and failures;
+* scorer-signed metrics, rendered with a separate evidence badge.
+
+It does not hold the signing key and does not expose hidden chain-of-thought.
 
 ## Where the research decisions live
 
@@ -78,6 +133,10 @@ claim.
 | `core/seed_stats.py` | the seed analyses, derived from the ledger with a cross-check against raw signed scores |
 | `core/report_md.py` | task-agnostic markdown helpers (see `CLEANUP_AUDIT.md` for their provenance) |
 | `agent/research_report.py` | the HTML report, including *capability versus demonstrated behaviour* |
+| `core/execution.py` | capability detection plus strict/fallback CPU/MPS/CUDA resolution |
+| `core/task.py`, `core/tabular_task.py` | registered and portable task contracts/loaders |
+| `core/task_scorer.py` | task-owned positional scoring in the separate signing process |
+| `agent/control.py` | live decision trace, replay, launch controls and hardware status |
 
 ## The typed control arm
 

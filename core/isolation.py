@@ -120,6 +120,7 @@ BACKENDS = ("none", "subprocess", "seatbelt", "docker")
 DATA_ROOT = ROOT / "runs" / "strategy_data"
 ISO_OUT = ROOT / "runs" / "iso"
 PROFILE_PATH = ROOT / "runs" / "strategy.sb"
+PORTABLE_SPEC_NAME = ".track2_task.json"
 
 
 class IsolationError(RuntimeError):
@@ -127,26 +128,67 @@ class IsolationError(RuntimeError):
 
 
 # ------------------------------------------------------------------ availability
+@dataclass(frozen=True)
+class DockerStatus:
+    """Structured Docker readiness, so callers branch on FIELDS, not on prose.
+
+    `make_sandbox` used to detect "the image is missing" with
+    `why.startswith("image ")` against the string below. That coupled control flow to the
+    wording of an error message: rephrasing the message would silently change which runs
+    were allowed, and it also asked the wrong question -- a CUDA run cares whether the CUDA
+    image exists, not whether the CPU one does.
+    """
+    cli: bool                  #: the docker binary is on PATH
+    daemon: bool               #: `docker info` succeeded
+    image: str                 #: the image this status was probed for
+    image_present: bool        #: `docker image inspect <image>` succeeded
+
+    @property
+    def usable(self) -> bool:
+        return self.cli and self.daemon and self.image_present
+
+    def reason(self) -> str:
+        """The human string `available()` has always returned. Empty when usable."""
+        if not self.cli:
+            return "docker not on PATH"
+        if not self.daemon:
+            return "docker daemon not responding"
+        if not self.image_present:
+            return (f"image {self.image!r} not built -- "
+                    f"`python3 -m core.isolation build-image`")
+        return ""
+
+
+def docker_status(image: str | None = None) -> DockerStatus:
+    """Probe Docker for ONE named image. No side effects.
+
+    `image` resolves at CALL time, not definition time: DOCKER_IMAGE is assigned further
+    down this module, so a default argument here would raise NameError at import.
+    """
+    image = image or DOCKER_IMAGE
+    if not shutil.which("docker"):
+        return DockerStatus(False, False, image, False)
+    r = subprocess.run(["docker", "info"], capture_output=True, timeout=30)
+    if r.returncode != 0:
+        return DockerStatus(True, False, image, False)
+    # The image must exist, checked HERE rather than discovered halfway through a run.
+    # `make_sandbox` is called once at driver startup, so a missing image should stop the
+    # run before the first evaluation.
+    q = subprocess.run(["docker", "image", "inspect", image],
+                       capture_output=True, timeout=60)
+    return DockerStatus(True, True, image, q.returncode == 0)
+
+
 def available() -> dict[str, str]:
-    """backend -> "" if usable, else why not. No side effects."""
+    """backend -> "" if usable, else why not. No side effects.
+
+    A string view over `docker_status()`, kept because every existing caller and test reads
+    it. New code that needs to branch should use `docker_status()` instead.
+    """
     why = {"none": "", "subprocess": ""}
     why["seatbelt"] = ("" if sys.platform == "darwin" and shutil.which("sandbox-exec")
                        else "sandbox-exec is macOS-only")
-    if not shutil.which("docker"):
-        why["docker"] = "docker not on PATH"
-    else:
-        r = subprocess.run(["docker", "info"], capture_output=True, timeout=30)
-        if r.returncode != 0:
-            why["docker"] = "docker daemon not responding"
-        else:
-            # The image must exist, checked HERE rather than discovered halfway
-            # through a run. `make_sandbox` is called once at driver startup, so a
-            # missing image should stop the run before the first evaluation.
-            q = subprocess.run(["docker", "image", "inspect", DOCKER_IMAGE],
-                               capture_output=True, timeout=60)
-            why["docker"] = ("" if q.returncode == 0 else
-                             f"image {DOCKER_IMAGE!r} not built -- "
-                             f"`python3 -m core.isolation build-image`")
+    why["docker"] = docker_status().reason()
     return why
 
 
@@ -174,11 +216,15 @@ class DataRoot:
     #: original from the deny list, so a strategy could still read the true labels at
     #: their absolute path. The probe caught it.
     deny_originals: tuple[str, ...] = ()
+    #: Absolute roots denied for portable tasks whose original CSV contains held-out
+    #: outcomes. The candidate reads only the redacted copy under `path`.
+    deny_paths: tuple[str, ...] = ()
 
     def describe(self) -> dict:
         d = {"path": str(self.path), "present": list(self.present),
              "absent_from_root": list(self.absent),
              "originals_denied_by_kernel": list(self.deny_originals),
+             "paths_denied_by_kernel": list(self.deny_paths),
              "log_random_included": self.log_random,
              "redactions": [dict(r) for r in self.redactions]}
         if self.log_random:
@@ -302,9 +348,53 @@ def prepare_data_root(allow_log_random: bool = False, root: Path = DATA_ROOT,
                     allow_log_random, tuple(redaction_report), deny_originals)
 
 
+def prepare_portable_data_root(spec, root: Path = DATA_ROOT) -> DataRoot:
+    """Build a redacted CSV root from a confirmed portable TaskSpec.
+
+    The original data directory is denied wholesale by the kernel.  This is stronger and
+    simpler than trying to enumerate every alternative filename an arbitrary task may use.
+    """
+    if root.exists():
+        if not root.is_dir() or root.is_symlink():
+            raise IsolationError(f"{root} exists and is not a real directory")
+        shutil.rmtree(root)
+    root.mkdir(parents=True)
+    info = spec.knowledge or {}
+    files = tuple(info.get("source_files") or ())
+    time_col = info.get("time_col")
+    outcomes = tuple(info.get("outcome_columns") or (spec.label,))
+    held_bounds = spec.split.bounds[spec.split.held_out_split]
+    if not files or not time_col:
+        raise IsolationError(
+            f"portable task {spec.slug!r} lacks source_files/time_col isolation metadata")
+    reports = []
+    for name in files:
+        src = spec.data_dir / name
+        dst = root / name
+        if src.suffix.lower() != ".csv":
+            raise IsolationError(
+                f"portable task isolation currently supports CSV, got {src.name}")
+        reports.append(redact_labels(src, dst, outcomes, time_col,
+                                     tuple(map(int, held_bounds))))
+    # The original task JSON usually lives beside the original data, whose whole directory
+    # is kernel-denied. Stage a safe equivalent beside the redacted copies. It also makes
+    # Docker portable: validation sees /work/data rather than a host-only absolute path.
+    source_spec = Path(info.get("task_spec_path") or "")
+    if not source_spec.is_file():
+        raise IsolationError(f"portable task {spec.slug!r} has no readable task_spec_path")
+    staged = json.loads(source_spec.read_text())
+    staged["data_dir"] = "."
+    (root / PORTABLE_SPEC_NAME).write_text(
+        json.dumps(staged, indent=2, sort_keys=True) + "\n")
+    present = tuple(sorted(files + (PORTABLE_SPEC_NAME,)))
+    return DataRoot(root.resolve(), present, (), False, tuple(reports), (),
+                    (str(spec.data_dir.resolve()),))
+
+
 # -------------------------------------------------------------------- seatbelt
 def seatbelt_profile(deny_files: list[Path], deny_dirs: list[Path],
-                     write_allow: list[Path]) -> str:
+                     write_allow: list[Path],
+                     deny_write_dirs: list[Path] | None = None) -> str:
     """Targeted-deny profile.
 
     Deliberately `(allow default)` plus explicit denies, rather than default-deny
@@ -317,7 +407,8 @@ def seatbelt_profile(deny_files: list[Path], deny_dirs: list[Path],
     Order matters in seatbelt: later rules win. So the broad write deny comes
     first and the output-directory allowance after it.
     """
-    for p in list(deny_files) + list(deny_dirs) + list(write_allow):
+    for p in (list(deny_files) + list(deny_dirs) + list(write_allow)
+              + list(deny_write_dirs or ())):
         if not Path(p).is_absolute():
             raise IsolationError(
                 f"seatbelt paths must be absolute; got {p!r}. A relative path in a "
@@ -341,6 +432,23 @@ def seatbelt_profile(deny_files: list[Path], deny_dirs: list[Path],
     # A directory is denied by subpath, a file by literal. Getting this backwards
     # silently denies nothing, so the caller states which is which.
     d_files, d_dirs = list(deny_files), list(deny_dirs)
+    # BOTH spellings, resolved and given: seatbelt matches the RESOLVED path, and on macOS
+    # /var is a symlink to /private/var -- so a rule naming a TMPDIR path under /var/folders
+    # matches nothing at all. This is the same trap as the symlinked-dataset escape above,
+    # and the first version of this deny fell straight into it: the profile looked correct
+    # and the candidate still overwrote its own source.
+    _dw = []
+    for q in (deny_write_dirs or ()):
+        _dw.append(Path(q))
+        try:
+            r = Path(q).resolve()
+        except (OSError, RuntimeError):
+            continue
+        if str(r) != str(q):
+            _dw.append(r)
+    d_write = sorted({str(x) for x in _dw})
+    artifact_deny = (f"(deny file-write*\n{sub([Path(x) for x in d_write])})"
+                     if d_write else "")
     return textwrap.dedent(f"""\
         (version 1)
         ;; Track 2 strategy sandbox -- generated, do not edit by hand.
@@ -359,7 +467,16 @@ def seatbelt_profile(deny_files: list[Path], deny_dirs: list[Path],
         {lit([Path(d) for d in devs])}
             (subpath "/dev/fd"))
 
-        ;; 3. no network. Nothing in the pipeline needs one, and a model that can
+        ;; 3. the candidate's OWN content-addressed source is never writable. This comes
+        ;;    AFTER the allowances above because later rules win: the store normally sits
+        ;;    inside the repo and is covered by the blanket write deny, but when
+        ;;    TRACK2_ARTIFACTS points it at a scratch dir under TMPDIR the tmp allowance
+        ;;    made it writable again -- a candidate then overwrote its own source and
+        ;;    verify() reported the tree altered. Stated explicitly rather than left
+        ;;    resting on where the store happens to live.
+        {artifact_deny}
+
+        ;; 4. no network. Nothing in the pipeline needs one, and a model that can
         ;;    reach the internet can fetch a label set.
         (deny network*)
         """)
@@ -367,6 +484,7 @@ def seatbelt_profile(deny_files: list[Path], deny_dirs: list[Path],
 
 # ----------------------------------------------------------------------- docker
 DOCKER_IMAGE = "track2-strategy"
+DOCKER_CUDA_IMAGE = os.environ.get("TRACK2_DOCKER_CUDA_IMAGE", "track2-strategy-cuda")
 CONTAINER_OUT = "/work/out"
 
 DOCKERFILE = textwrap.dedent("""\
@@ -386,18 +504,61 @@ def build_image(image: str = DOCKER_IMAGE) -> None:
     print(f"built {image}")
 
 
-def _docker_argv(image: str, data: DataRoot, out_dir: Path, argv: list[str]) -> list[str]:
+def _docker_argv(image: str, data: DataRoot, out_dir: Path, argv: list[str],
+                 env_extra: dict | None = None) -> list[str]:
     """Mount the permitted files one by one, read-only. The quarantined file is
     never mounted, so no path inside the container resolves to it."""
-    cmd = ["docker", "run", "--rm", "--network", "none",
+    args = list(argv)
+    mounts = []
+
+    def rewrite(flag: str, container_path: str, *, directory: bool = False):
+        if flag not in args:
+            return
+        i = args.index(flag) + 1
+        host = Path(args[i]).resolve()
+        if not host.exists() or (directory and not host.is_dir()):
+            raise IsolationError(f"docker input for {flag} does not exist: {host}")
+        mounts.extend(["-v", f"{host}:{container_path}:ro"])
+        args[i] = container_path
+
+    # Generated source and its immutable contract are host paths. The old Docker command
+    # forwarded those absolute paths without mounting them, so Docker isolation could not
+    # execute a candidate at all. Every executable input is now a read-only mount.
+    rewrite("--candidate", "/work/candidate", directory=True)
+    rewrite("--workspace", "/work/workspace", directory=True)
+    rewrite("--patch", "/work/patch.py")
+    if "--task-spec" in args:
+        i = args.index("--task-spec") + 1
+        host = Path(args[i]).resolve()
+        try:
+            rel = host.relative_to(data.path.resolve())
+        except ValueError:
+            rewrite("--task-spec", "/work/task_spec.json")
+        else:
+            args[i] = f"/work/data/{rel.as_posix()}"
+    if "--out-dir" in args:
+        args[args.index("--out-dir") + 1] = CONTAINER_OUT
+
+    device = str((env_extra or {}).get("TRACK2_DEVICE", "cpu"))
+    cmd = ["docker", "run", "--rm", "--network", "none"]
+    if device == "cuda":
+        cmd += ["--gpus", "all"]
+    cmd += [
            "-v", f"{ROOT / 'core'}:/work/core:ro",
            "-v", f"{ROOT / 'strategy'}:/work/strategy:ro",
            "-v", f"{out_dir}:{CONTAINER_OUT}",
-           "-w", "/work"]
+           *mounts, "-w", "/work"]
     for name in data.present:
-        cmd += ["-v", f"{(REAL_DATA / name)}:/work/data/{name}:ro"]
-    cmd += ["-e", "TRACK2_DATA_ROOT=/work/data", "-e", "TRACK2_SANDBOX=1", image]
-    return cmd + argv
+        # Mount the prepared view, not the original. For the official task these are
+        # symlinks and resolve to the permitted originals; for portable tasks these are
+        # real redacted copies.
+        cmd += ["-v", f"{(data.path / name).resolve()}:/work/data/{name}:ro"]
+    cmd += ["-e", "TRACK2_DATA_ROOT=/work/data", "-e", "TRACK2_SANDBOX=1"]
+    for key in ("TRACK2_FRAMEWORK", "TRACK2_DEVICE", "TRACK2_EXECUTION_PROFILE"):
+        if key in (env_extra or {}):
+            cmd += ["-e", f"{key}={env_extra[key]}"]
+    cmd += [image]
+    return cmd + args
 
 
 # ------------------------------------------------------------------ environment
@@ -457,13 +618,13 @@ class Sandbox:
             return f"{CONTAINER_OUT}/{Path(host_path).name}"
         return str(host_path)
 
-    def argv(self, py_args: list[str]) -> list[str]:
+    def argv(self, py_args: list[str], env_extra: dict | None = None) -> list[str]:
         base = [sys.executable, "-B"] + py_args
         if self.backend == "seatbelt":
             return ["sandbox-exec", "-f", str(self.profile)] + base
         if self.backend == "docker":
             return _docker_argv(self.image, self.data, self.out_dir,
-                                ["python", "-B"] + py_args)
+                                ["python", "-B"] + py_args, env_extra)
         return base
 
     def run(self, py_args: list[str], timeout: float = 1800.0,
@@ -473,7 +634,7 @@ class Sandbox:
         stdout is the channel and it must contain exactly one JSON object, so the
         strategy's own prints cannot be mistaken for a result.
         """
-        cmd = self.argv(py_args)
+        cmd = self.argv(py_args, env_extra)
         p = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout,
                            cwd=str(ROOT),
                            env=child_env(self.data.path, env_extra))
@@ -496,35 +657,71 @@ DEFAULT_REDACT = [{"file": "log_standard_4_22_to_5_08_pure.csv",
 
 
 def make_sandbox(backend: str = "auto", allow_log_random: bool = False,
-                 out_dir: Path = ISO_OUT, redact: list[dict] | None = None) -> Sandbox:
+                 out_dir: Path = ISO_OUT, redact: list[dict] | None = None,
+                 task_spec=None, device: str = "cpu") -> Sandbox:
     if backend == "auto":
         backend = detect_backend()
     if backend not in BACKENDS:
         raise IsolationError(f"unknown backend {backend!r}; choose from {BACKENDS}")
-    why = available().get(backend, "")
-    if why:
-        raise IsolationError(f"backend {backend!r} unusable: {why}")
+    image = DOCKER_IMAGE
+    if backend != "docker":
+        why = available().get(backend, "")
+        if why:
+            raise IsolationError(f"backend {backend!r} unusable: {why}")
+    else:
+        if device == "mps":
+            raise IsolationError(
+                "MPS is not exposed through this Docker backend; use seatbelt or "
+                "subprocess on the Apple host")
+        # Probe the image this run will ACTUALLY use, and branch on structured fields.
+        image = DOCKER_CUDA_IMAGE if device == "cuda" else DOCKER_IMAGE
+        st = docker_status(image)
+        if not st.cli or not st.daemon:
+            raise IsolationError(f"backend 'docker' unusable: {st.reason()}")
+        if not st.image_present:
+            if device == "cuda":
+                raise IsolationError(
+                    f"CUDA execution requested but Docker image {image!r} is absent. "
+                    "Build/provide a CUDA PyTorch image and set "
+                    "TRACK2_DOCKER_CUDA_IMAGE, or use native subprocess isolation.")
+            raise IsolationError(f"backend 'docker' unusable: {st.reason()}")
 
-    data = prepare_data_root(allow_log_random,
-                             redact=DEFAULT_REDACT if redact is None else redact)
+    if task_spec is not None and (task_spec.knowledge or {}).get("task_spec_path"):
+        data = prepare_portable_data_root(task_spec)
+    else:
+        data = prepare_data_root(allow_log_random,
+                                 redact=DEFAULT_REDACT if redact is None else redact)
     out_dir.mkdir(parents=True, exist_ok=True)
     extra_files, extra_dirs = _extra_denied_paths()
     # deny the ORIGINALS, not merely what is absent from the root
     deny_files = [REAL_DATA / n for n in data.deny_originals] + extra_files
+    extra_dirs = extra_dirs + [Path(p) for p in data.deny_paths]
     # ...and deny the RESOLVED target of each, because seatbelt matches resolved paths.
     # Found by running this suite in a checkout where KuaiRand-Pure is a SYMLINK to the
     # dataset: the profile named the link path, the kernel matched the target, and
     # `read_eval_labels` went from blocked to SUCCEEDED with no other change. Denying both
     # spellings costs nothing and removes the whole class.
-    resolved = []
-    for q in deny_files + extra_dirs:
-        try:
-            r = Path(q).resolve()
-        except (OSError, RuntimeError):
-            continue
-        if str(r) != str(q):
-            resolved.append(r)
-    deny_files = deny_files + [r for r in resolved if r not in extra_dirs]
+    # A resolved DIRECTORY target must go back into the directory list. The earlier version
+    # appended every resolved target to deny_files, i.e. to the `(literal ...)` list -- and
+    # this module's own profile comment warns that denying a directory as a literal "silently
+    # denies nothing" for the files inside it. Not exploitable in this layout (the denied
+    # dirs are real repo directories and deny_paths arrives already resolved), but it is the
+    # same class as the symlinked-dataset escape above, so it is closed rather than noted.
+    def _resolved_targets(paths):
+        out = []
+        for q in paths:
+            try:
+                r = Path(q).resolve()
+            except (OSError, RuntimeError):
+                continue
+            if str(r) != str(q):
+                out.append(r)
+        return out
+
+    resolved_files = _resolved_targets(deny_files)
+    resolved_dirs = _resolved_targets(extra_dirs)
+    deny_files = deny_files + [r for r in resolved_files if r not in extra_dirs]
+    extra_dirs = extra_dirs + [r for r in resolved_dirs if r not in extra_dirs]
     denied = tuple(str(p) for p in deny_files + extra_dirs)
 
     prof = None
@@ -535,8 +732,12 @@ def make_sandbox(backend: str = "auto", allow_log_random: bool = False,
         # nothing inside it writes there (the loader does no caching and
         # PYTHONDONTWRITEBYTECODE stops __pycache__), and it is a SHARED path -- so a
         # writable data root let one candidate alter the data the next one reads.
-        prof.write_text(seatbelt_profile(deny_files, extra_dirs, [out_dir]))
-    return Sandbox(backend, data, out_dir, prof, denied=denied)
+        # Passed explicitly so "a candidate cannot edit its own source" holds wherever
+        # TRACK2_ARTIFACTS points the store.
+        from core import artifacts as _AR
+        prof.write_text(seatbelt_profile(deny_files, extra_dirs, [out_dir],
+                                         deny_write_dirs=[_AR.ARTIFACTS]))
+    return Sandbox(backend, data, out_dir, prof, image=image, denied=denied)
 
 
 # -------------------------------------------------------------------------- probe

@@ -88,6 +88,8 @@ class TaskSpec:
     split: SplitSpec
     submission: SubmissionSpec
     loader: Callable                           # () -> (dict[str, Rows], aux)
+    #: scorer-side loader with held-out labels present. Optional only for historical specs.
+    scorer_loader: Callable | None = None
     #: published reference points. `baseline` is what must be beaten.
     baseline: dict = field(default_factory=dict)
     #: the organisers' convergence rule when they give one, else ours, declared
@@ -140,6 +142,7 @@ def kuairand_pure() -> TaskSpec:
             note="(user_id, video_id) is NOT unique -- 3.06% duplicate pairs in test, "
                  "up to 12 repeats -- so row_id is mandatory"),
         loader=D.load_for_strategy,
+        scorer_loader=D.load_for_scorer,
         baseline={"name": "FM (organiser-provided)",
                   "valid": OFFICIAL_VALID["fm_official"],
                   "test": OFFICIAL_TEST["fm_official"],
@@ -163,3 +166,12 @@ def get(slug: str) -> TaskSpec:
     if slug not in REGISTRY:
         raise KeyError(f"unknown task {slug!r}; registered: {sorted(REGISTRY)}")
     return REGISTRY[slug]()
+
+
+def load(path_or_slug: str | Path) -> TaskSpec:
+    """Load a registered task or a confirmed portable JSON task specification."""
+    p = Path(path_or_slug)
+    if p.is_file():
+        from core.tabular_task import load_task_spec
+        return load_task_spec(p)
+    return get(str(path_or_slug))

@@ -1,0 +1,28 @@
+{
+  "slug": "shop_clicks_demo",
+  "title": "Portable shop impressions — rank products within account",
+  "data_dir": ".",
+  "files": ["events.csv"],
+  "label": "converted",
+  "time_col": "day",
+  "feature_cols": ["account_id", "product_id", "context"],
+  "group_by": "account_id",
+  "item_col": "product_id",
+  "outcome_columns": ["converted"],
+  "splits": {
+    "train": [1, 3],
+    "valid": [4, 5],
+    "test": [6, 6]
+  },
+  "metric": "within_user_ranking_gauc_ndcg5",
+  "baseline": {
+    "name": "declared random-order reference",
+    "valid": 0.5
+  },
+  "convergence": {
+    "epsilon": 0.01,
+    "N": 2,
+    "source": "portable demo task declaration"
+  },
+  "submission_header": ["row_id", "account_id", "product_id", "score"]
+}

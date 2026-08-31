@@ -102,7 +102,20 @@ def fns_of(path):
 MIN = ROOT / "research_workspace_minimal"
 INH = ROOT / "research_workspace"
 check("both seed profiles exist", MIN.is_dir() and INH.is_dir())
-check("the profiles are registered", set(CAND.PROFILES) == {"inherited", "minimal"})
+# The set is PINNED so that adding a seed profile is a deliberate, reviewed change rather
+# than a silent one. `accelerated` was added by the execution-profile work; it is optional,
+# PyTorch-only, and must never be mistaken for the profile the submission was built from.
+check("the profiles are registered",
+      set(CAND.PROFILES) == {"inherited", "minimal", "accelerated"},
+      str(sorted(CAND.PROFILES)))
+check("the accelerated profile exists on disk",
+      (ROOT / "research_workspace_accelerated").is_dir())
+_ap = CAND.profile_provenance("accelerated")
+check("the accelerated profile is NOT labelled the official NumPy seed",
+      _ap["official_numpy_seed"] is False, str(_ap))
+check("the frozen submission is unaffected by it: champion source has no torch import",
+      not any("import torch" in (cs / f).read_text()
+              for f in ("model.py", "train.py", "features.py") if (cs / f).is_file()))
 
 min_fns = fns_of(MIN / "model.py") | fns_of(MIN / "train.py")
 inh_fns = fns_of(INH / "model.py") | fns_of(INH / "train.py")

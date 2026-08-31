@@ -41,7 +41,24 @@ from pathlib import Path
 from typing import Iterable, Mapping
 
 ROOT = Path(__file__).resolve().parents[1]
-ARTIFACTS = ROOT / "runs" / "artifacts"
+#: Where trees are stored. Overridable the same way the scorer's socket and ledger are
+#: (`TRACK2_SOCKET`, `TRACK2_LEDGER`): an absolute path in the environment, read once at
+#: import. This exists because the store is a TRACKED directory -- the ledger names trees by
+#: hash and a reader must be able to check them -- while the test suite writes real trees
+#: every run. Without an override, running the suite left untracked artifacts in the repo,
+#: which is a commit hazard rather than evidence. `tests/run_all.sh` points this at a scratch
+#: directory for exactly that reason.
+#:
+#: A RELATIVE value is refused. The default arguments below bind this at import time, so a
+#: relative path would silently resolve against whatever directory each process happened to
+#: start in, and trees would scatter instead of landing in one store.
+_ARTIFACTS_ENV = os.environ.get("TRACK2_ARTIFACTS") or ""
+if _ARTIFACTS_ENV and not Path(_ARTIFACTS_ENV).is_absolute():
+    raise ValueError(
+        f"TRACK2_ARTIFACTS must be an absolute path; got {_ARTIFACTS_ENV!r}. A relative "
+        f"artifact root resolves against each process's working directory, so candidates "
+        f"and the reader would disagree about where a tree lives.")
+ARTIFACTS = Path(_ARTIFACTS_ENV) if _ARTIFACTS_ENV else ROOT / "runs" / "artifacts"
 
 #: Bumped only if the canonical serialisation below changes, which would invalidate every
 #: previously recorded hash. Part of the hash input so old and new can never collide.

@@ -64,6 +64,11 @@ ISOLATION = ("seatbelt", "docker", "subprocess", "none")
 #: drivers' argparse, so adding a choice to one and not the other is a test failure.
 DRIVERS = ("official", "research")
 BACKENDS = ("gemini", "ollama", "groq", "anthropic")
+RESEARCH_POLICIES = ("tournament", "single")
+SEED_PROFILES = ("inherited", "minimal", "accelerated")
+FRAMEWORKS = ("auto", "numpy", "torch")
+DEVICES = ("auto", "cpu", "mps", "cuda")
+ACCELERATOR_POLICIES = ("off", "allow", "prefer", "require")
 
 # Bounds are cost controls, not style. An LLM arm at 400 iterations is real money, and a
 # --max-seconds of a week is a machine nobody gets back.
@@ -77,6 +82,8 @@ BOUNDS = {
     # the organisers' cap is 6 h; the upper bound here is that, not a round number
     "max_wall_seconds": (60.0, 21_600.0, float),
     "max_repairs": (0, 5, int),
+    "tournament_size": (6, 12, int),
+    "max_coverage_repairs": (0, 3, int),
     "epsilon_greedy": (0.0, 1.0, float),
 }
 
@@ -103,6 +110,7 @@ class Spec:
     proposer: str = "random"
     model: str | None = None
     thinking_level: str | None = None
+    thought_summaries: bool = False
     iterations: int = 12
     #: SEARCH seed -- the driver's RNG and the proposer's sampling.
     seed: int = 0
@@ -124,6 +132,19 @@ class Spec:
     backend: str = "gemini"
     max_wall_seconds: float = 21_600.0
     max_repairs: int = 3
+    research_policy: str = "tournament"
+    tournament_size: int = 6
+    max_coverage_repairs: int = 1
+    seed_profile: str = "inherited"
+    planner_model: str | None = None
+    judge_model: str | None = None
+    coder_model: str | None = None
+    reflector_model: str | None = None
+    framework: str = "auto"
+    device: str = "auto"
+    accelerator_policy: str = "prefer"
+    no_device_fallback: bool = False
+    task_spec: str = ""
     #: JSON object merged into the seed tree's config.json. Empty means start from the
     #: unmodified official baseline, which is what an unqualified autonomy claim requires.
     seed_config: str = ""
@@ -140,11 +161,30 @@ class Spec:
                   "--max-wall-seconds", str(self.max_wall_seconds),
                   "--fit-seconds", str(self.patch_seconds),
                   "--max-repairs", str(self.max_repairs),
-                  "--max-tokens", str(self.max_tokens)]
+                  "--max-tokens", str(self.max_tokens),
+                  "--research-policy", self.research_policy,
+                  "--tournament-size", str(self.tournament_size),
+                  "--max-coverage-repairs", str(self.max_coverage_repairs),
+                  "--seed-profile", self.seed_profile,
+                  "--framework", self.framework,
+                  "--device", self.device,
+                  "--accelerator-policy", self.accelerator_policy]
             if self.model:
                 av += ["--model", self.model]
             if self.thinking_level:
                 av += ["--thinking-level", self.thinking_level]
+            if self.thought_summaries:
+                av += ["--thought-summaries"]
+            for flag, value in (("--planner-model", self.planner_model),
+                                ("--judge-model", self.judge_model),
+                                ("--coder-model", self.coder_model),
+                                ("--reflector-model", self.reflector_model)):
+                if value:
+                    av += [flag, value]
+            if self.no_device_fallback:
+                av += ["--no-device-fallback"]
+            if self.task_spec:
+                av += ["--task-spec", self.task_spec]
             if self.seed_config:
                 av += ["--seed-config", self.seed_config]
             return av
@@ -232,8 +272,16 @@ def parse(form: dict) -> Spec:
     s.start_loss = _enum(form, "start_loss", LOSSES, s.start_loss)
     s.patch_isolation = _enum(form, "patch_isolation", ISOLATION, s.patch_isolation)
     s.backend = _enum(form, "backend", BACKENDS, s.backend)
+    s.research_policy = _enum(
+        form, "research_policy", RESEARCH_POLICIES, s.research_policy)
+    s.seed_profile = _enum(form, "seed_profile", SEED_PROFILES, s.seed_profile)
+    s.framework = _enum(form, "framework", FRAMEWORKS, s.framework)
+    s.device = _enum(form, "device", DEVICES, s.device)
+    s.accelerator_policy = _enum(
+        form, "accelerator_policy", ACCELERATOR_POLICIES, s.accelerator_policy)
     for k in ("iterations", "seed", "model_seed", "max_seconds", "max_tokens",
-              "patch_seconds", "epsilon_greedy", "max_wall_seconds", "max_repairs"):
+              "patch_seconds", "epsilon_greedy", "max_wall_seconds", "max_repairs",
+              "tournament_size", "max_coverage_repairs"):
         setattr(s, k, _num(form, k, getattr(s, k)))
 
     m = _one(form, "model").strip()
@@ -241,6 +289,12 @@ def parse(form: dict) -> Spec:
         if not MODEL_RE.match(m):
             raise LaunchRefused(f"model: {m!r} is not an acceptable identifier")
         s.model = m
+    for attr in ("planner_model", "judge_model", "coder_model", "reflector_model"):
+        value = _one(form, attr).strip()
+        if value:
+            if not MODEL_RE.match(value):
+                raise LaunchRefused(f"{attr}: {value!r} is not an acceptable identifier")
+            setattr(s, attr, value)
     t = _one(form, "thinking_level").strip()
     if t:
         if not THINKING_RE.match(t):
@@ -252,6 +306,24 @@ def parse(form: dict) -> Spec:
     s.tag = tag
 
     s.allow_random_log = _one(form, "allow_random_log").strip().lower() in ("1", "on", "true", "yes")
+    s.no_device_fallback = _one(form, "no_device_fallback").strip().lower() in (
+        "1", "on", "true", "yes")
+    s.thought_summaries = _one(form, "thought_summaries").strip().lower() in (
+        "1", "on", "true", "yes")
+
+    task_spec = _one(form, "task_spec").strip()
+    if task_spec:
+        if s.driver != "research":
+            raise LaunchRefused("task_spec applies only to the code-first research loop")
+        p = Path(task_spec)
+        p = (ROOT / p).resolve() if not p.is_absolute() else p.resolve()
+        try:
+            p.relative_to(ROOT)
+        except ValueError:
+            raise LaunchRefused("task_spec must be a JSON file inside this repository")
+        if p.suffix.lower() != ".json" or not p.is_file():
+            raise LaunchRefused(f"task_spec is not an existing JSON file: {p}")
+        s.task_spec = str(p)
 
     sc = _one(form, "seed_config").strip()
     if sc:
@@ -313,7 +385,8 @@ def child_env(spec: Spec, base: dict | None = None) -> dict:
     env = dict(os.environ if base is None else base)
     for k in NEVER_INHERIT:
         env.pop(k, None)
-    if spec.proposer == "random":
+    needs_llm = spec.driver == "research" or spec.proposer != "random"
+    if not needs_llm:
         for k in LLM_KEYS:
             env.pop(k, None)
     env["PYTHONUNBUFFERED"] = "1"

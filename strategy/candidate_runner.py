@@ -27,6 +27,7 @@ from __future__ import annotations
 import argparse
 import importlib
 import json
+import os
 import sys
 import time
 import traceback
@@ -39,7 +40,7 @@ import numpy as np
 MAX_SECONDS_DEFAULT = 900
 
 
-def _import_entry(cand_dir: Path, workspace: Path):
+def _import_entry(cand_dir: Path, workspace: Path, task_primary=None):
     """Import the candidate's train.py with the candidate's own modules taking priority.
 
     Order matters: `cand_dir` first so `features`/`model` resolve to the candidate's
@@ -56,6 +57,13 @@ def _import_entry(cand_dir: Path, workspace: Path):
     for name in ("train", "features", "model", "contract"):
         sys.modules.pop(name, None)
     importlib.invalidate_caches()
+    # Candidate seeds import `primary` from the immutable contract for early stopping.
+    # Bind that name to the active TaskSpec before train.py imports it.  The scorer still
+    # owns the authoritative number; this is only the public-dev feedback candidates need
+    # to train correctly on a non-KuaiRand task.
+    contract = importlib.import_module("contract")
+    if task_primary is not None:
+        contract.primary = task_primary
     return importlib.import_module("train")
 
 
@@ -64,6 +72,8 @@ def main() -> None:
     ap.add_argument("--candidate", required=True, help="directory holding the tree")
     ap.add_argument("--workspace", required=True, help="directory holding contract.py")
     ap.add_argument("--task", default="kuairand_pure")
+    ap.add_argument("--task-spec", default=None,
+                    help="confirmed portable JSON TaskSpec; absent for registered tasks")
     ap.add_argument("--params", default="{}")
     ap.add_argument("--out-dir", required=True)
     ap.add_argument("--max-seconds", type=float, default=MAX_SECONDS_DEFAULT)
@@ -71,11 +81,15 @@ def main() -> None:
 
     out = Path(a.out_dir)
     out.mkdir(parents=True, exist_ok=True)
-    meta = {"candidate": str(a.candidate), "task": a.task, "ok": False}
+    meta = {"candidate": str(a.candidate), "task": a.task, "ok": False,
+            "execution": {
+                "framework": os.environ.get("TRACK2_FRAMEWORK", "numpy"),
+                "device": os.environ.get("TRACK2_DEVICE", "cpu"),
+            }}
     t0 = time.perf_counter()
     try:
-        from core.task import get
-        spec = get(a.task)
+        from core.task import load
+        spec = load(a.task_spec or a.task)
         splits, edges = spec.loader()
         dev_name, held_name = spec.split.dev_split, spec.split.held_out_split
         train, dev, heldout = splits["train"], splits[dev_name], splits[held_name]
@@ -95,7 +109,36 @@ def main() -> None:
                               held_out_split=held_name, label=spec.label))
         sub_idx, sub_hash = train_subset(data)
 
-        mod = _import_entry(Path(a.candidate), Path(a.workspace))
+        # `k` must be FORWARDED. The contract's primary() and core.metrics.primary() both
+        # take k and pass it on; an earlier wrapper accepted k and dropped it, so a candidate
+        # doing nDCG@10 early stopping silently got the nDCG@5 number instead (measured:
+        # 0.5429 vs 0.4463 on a synthetic split -- a 0.097 discrepancy, on the official task
+        # too, since this wrapper is installed for every task). Portable metrics such as
+        # global AUC take no k, so forward it only where the signature accepts it.
+        import inspect as _inspect
+        try:
+            _takes_k = "k" in _inspect.signature(spec.metric.fn).parameters
+        except (TypeError, ValueError):
+            _takes_k = False
+
+        def task_primary(group, labels, scores, k=None):
+            fn = spec.metric.fn
+            if _takes_k:
+                measured = dict(fn(group, labels, scores, k=(5 if k is None else k)))
+            else:
+                # MetricSpec.fn is contractually (ids, labels, scores) -- the official task's
+                # is a 3-arg lambda. Silently returning the k=5 number for a candidate that
+                # asked for k=10 is the failure mode being closed here; refuse instead.
+                if k is not None and int(k) != 5:
+                    raise ContractError(
+                        f"this task's metric is fixed at its published cutoff and cannot "
+                        f"honour k={k}. The scorer's number is the graded one; a candidate "
+                        f"must not early-stop on a different cutoff than it reports.")
+                measured = dict(fn(group, labels, scores))
+            measured.setdefault("primary", measured[spec.metric.primary_key])
+            return measured
+
+        mod = _import_entry(Path(a.candidate), Path(a.workspace), task_primary)
         entry = getattr(mod, "fit_predict", None)
         if entry is None or not callable(entry):
             raise ContractError(

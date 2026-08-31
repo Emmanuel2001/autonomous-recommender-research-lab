@@ -298,6 +298,26 @@ check("slug matches the schema pattern",
       dr["slug"])
 check("heuristic states it is a heuristic", "HEURISTIC" in dr["rationale"])
 
+print("== confirmation produces a runnable portable task, not a dead declaration")
+confirmed_path = TMP / "confirmed_task.json"
+confirmed_cfg = DT.portable_config(
+    GOOD, TMP, DT.validate(GOOD, TMP), goal="predict clicks", drafted_by="test",
+    epsilon=0.01, window=2, baseline_valid=0.5)
+confirmed_path.write_text(json.dumps(confirmed_cfg))
+from core.task import load as load_task
+confirmed = load_task(confirmed_path)
+portable_splits, _ = confirmed.loader()
+check("confirmed JSON loads through the runtime TaskSpec path",
+      confirmed.slug == GOOD["slug"])
+check("confirmed JSON carries human-set stopping rule",
+      confirmed.convergence["epsilon"] == 0.01 and confirmed.convergence["N"] == 2)
+check("confirmed task is actually runnable on its custom table",
+      len(portable_splits["train"]) > 0 and portable_splits["valid"].label is not None)
+check("confirmed task quarantines its held-out labels",
+      portable_splits["test"].label is None)
+check("confirmed task keeps its declared validation baseline",
+      confirmed.baseline["valid"] == 0.5)
+
 print("== schema and metric registry are self-consistent")
 check("schema enumerates exactly the implemented metrics",
       set(DT.SCHEMA["properties"]["metric"]["enum"]) == set(DT.METRICS))

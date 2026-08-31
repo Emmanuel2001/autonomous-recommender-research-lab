@@ -91,7 +91,8 @@ check("research isolation choices agree with the research driver",
 check("research convergence choices agree with the research driver",
       tuple(CL.CONVERGENCE) == tuple(racts["convergence"].choices or ()))
 for flag in ("iterations", "max_wall_seconds", "fit_seconds", "max_repairs",
-             "max_tokens", "model", "thinking_level", "seed_config"):
+             "max_tokens", "model", "thinking_level", "thought_summaries",
+             "task_spec", "seed_config"):
     check(f"the research driver really accepts --{flag.replace('_','-')}", flag in racts)
 check("both drivers are offered by the UI", tuple(CL.DRIVERS) == ("official", "research"))
 
@@ -108,6 +109,19 @@ try:
 except SystemExit:
     ok_parse = False
 check("the research driver parses the exact argv the UI builds", ok_parse, " ".join(av[4:]))
+
+portable = Path(__file__).resolve().parent / "fixtures" / "portable_recommender" / "task.json"
+sp_portable = CL.parse({"driver": "research", "backend": "gemini", "model": "m",
+                        "task_spec": str(portable), "thought_summaries": "1"})
+check("portable task path reaches the research driver",
+      sp_portable.argv()[sp_portable.argv().index("--task-spec") + 1] == str(portable))
+check("public thought summaries reach the research driver",
+      "--thought-summaries" in sp_portable.argv())
+check("task specs outside the repository are refused",
+      refused({"driver": "research", "backend": "gemini", "model": "m",
+               "task_spec": "/tmp/outside.json"}, "inside this repository"))
+check("task spec is research-only",
+      refused({"proposer": "random", "task_spec": str(portable)}, "code-first"))
 
 print("== enums reject anything not on the list")
 check("unknown proposer refused", refused({"proposer": "gpt5"}, "not one of"))

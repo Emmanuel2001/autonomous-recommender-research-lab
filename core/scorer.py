@@ -444,7 +444,7 @@ def _isolation_available() -> dict:
 
 
 def serve(include_quarantine: bool = False, allow_broken_chain: bool = False,
-          task: str = "official") -> None:
+          task: str = "official", task_spec: str | None = None) -> None:
     """task="official" -> the CURRENT task (GAUC/nDCG@5, within-user, long_view).
        task="legacy"   -> the SUPERSEDED task (NDCG@10/Recall@50, full catalog).
 
@@ -464,7 +464,20 @@ def serve(include_quarantine: bool = False, allow_broken_chain: bool = False,
     # genesis entry and every later isolation-claim check read this one map.
     isolation_avail = _isolation_available()
 
-    if task == "official":
+    portable_spec = None
+    if task_spec:
+        if include_quarantine:
+            sys.exit("--include-quarantine is not defined for portable task specs")
+        from core.task import load as load_task
+        portable_spec = load_task(task_spec)
+        if portable_spec.scorer_loader is None:
+            sys.exit(f"portable task {portable_spec.slug!r} has no scorer_loader")
+        official_splits, official_edges = portable_spec.scorer_loader()
+        view = None
+        task = portable_spec.slug
+        print(f"task={task} (portable)  splits=" +
+              ", ".join(f"{k}:{len(v):,}" for k, v in official_splits.items()))
+    elif task == "official":
         from core.official_data import load_for_scorer as _load_official
         # `include_quarantine` has NO EFFECT here -- the official loader takes no such
         # argument -- so accepting it would write `include_quarantine: true` into a signed
@@ -492,7 +505,15 @@ def serve(include_quarantine: bool = False, allow_broken_chain: bool = False,
     if led.repaired:
         print(f"repaired a {led.repaired}-byte truncated tail (crash residue; those "
               f"bytes could not verify under any key)")
-    if task == "official":
+    if portable_spec is not None:
+        manifest = {"task": portable_spec.slug, "label": portable_spec.label,
+                    "metric": portable_spec.metric.name,
+                    "convergence": portable_spec.convergence,
+                    "task_spec": str(Path(task_spec).resolve()),
+                    "splits": {k: {"rows": len(v), "content_sha256": v.content_sha256()}
+                               for k, v in official_splits.items()}}
+        manifest_sha = hashlib.sha256(canonical(manifest)).hexdigest()
+    elif task == "official":
         manifest = {"task": "official_within_user_ranking", "label": "long_view",
                     "metric": "primary = mean(GAUC, nDCG@5)",
                     "convergence": {"epsilon": 0.002, "N": 3},
@@ -559,7 +580,7 @@ def serve(include_quarantine: bool = False, allow_broken_chain: bool = False,
                         print(f"  seq={entry['seq']:>4} COMPARE {pl['a']['label']} vs "
                               f"{pl['b']['label']} -> {pl['overall_verdict'].upper()}")
                     elif op == "score_official":
-                        if official_splits is None:
+                        if official_splits is None or portable_spec is not None:
                             raise ScoringError("this scorer was started with task=legacy")
                         sp = req.get("split", "valid")
                         if sp not in official_splits:
@@ -585,6 +606,28 @@ def serve(include_quarantine: bool = False, allow_broken_chain: bool = False,
                               f"nDCG@5={m['nDCG@5']:.4f} primary={m['primary']:.4f} "
                               f"d={entry['payload']['delta_vs_official_baseline']:+.4f}"
                               + (f"  FLAGS={fl}" if fl else ""))
+                    elif op == "score_task":
+                        if portable_spec is None:
+                            raise ScoringError(
+                                "score_task requires a scorer started with --task-spec")
+                        sp = req.get("split", portable_spec.split.dev_split)
+                        if sp not in official_splits:
+                            raise ScoringError(f"unknown split {sp!r}")
+                        from core.task_scorer import score_task, TaskScoringError
+                        try:
+                            entry = score_task(
+                                req["scores"], sp, official_splits[sp], portable_spec,
+                                req.get("config_hash", ""), led,
+                                kind=req.get("kind", "score"),
+                                isolation=req.get("isolation", "unspecified"),
+                                seed=req.get("seed"),
+                                isolation_available=isolation_avail)
+                        except TaskScoringError as e:
+                            raise ScoringError(str(e)) from None
+                        resp = {"ok": True, "entry": entry}
+                        pl = entry["payload"]
+                        print(f"  seq={entry['seq']:>4} {sp:8s} "
+                              f"primary={pl['metrics']['primary']:.6f}")
                     elif op == "record":
                         entry = record(req.get("kind", ""), req.get("body", {}),
                                        manifest_sha, led)
@@ -663,6 +706,8 @@ def main() -> None:
     sv.add_argument("--task", default="official", choices=["official", "legacy"],
                     help="official = the CURRENT task (GAUC/nDCG@5). legacy = the "
                          "superseded full-catalog task, kept for reproducing old runs.")
+    sv.add_argument("--task-spec", default=None,
+                    help="confirmed portable JSON TaskSpec; overrides --task")
     sv.add_argument("--allow-broken-chain", action="store_true",
                     help="append to a ledger that does not verify. Only for "
                          "deliberately demonstrating tamper detection.")
@@ -671,7 +716,7 @@ def main() -> None:
     kg = sub.add_parser("keygen"); kg.add_argument("--force", action="store_true")
     a = ap.parse_args()
     if a.cmd == "serve":
-        serve(a.include_quarantine, a.allow_broken_chain, a.task)
+        serve(a.include_quarantine, a.allow_broken_chain, a.task, a.task_spec)
     elif a.cmd == "verify":
         print(verify(a.ledger, _key_or_die()))
     elif a.cmd == "keygen":

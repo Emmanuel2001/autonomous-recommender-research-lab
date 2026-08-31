@@ -187,6 +187,72 @@ check("read_dir without include still skips __pycache__ and .pyc",
       not any("pycache" in k or k.endswith(".pyc") for k in A.read_dir(wd)))
 check("read_dir refuses a non-directory", raises(A.read_dir, wd / "model.py") != "")
 
+# ============================ the store root is configurable, and the suite uses a scratch one
+# runs/artifacts/ is TRACKED: the ledger names trees by hash and a reader must be able to
+# check them. But the suite writes real trees on every run, so without an override each run
+# left untracked artifacts in the repository. These tests pin the override AND the wiring, so
+# neither can regress into polluting the tracked store again.
+import os as _os, subprocess as _sp
+
+ROOT = Path(__file__).resolve().parents[1]
+_PROBE = ("import sys; sys.path.insert(0, %r); "
+          "from core.artifacts import ARTIFACTS; print(ARTIFACTS)" % str(ROOT))
+
+
+def _root_with(env_value):
+    e = dict(_os.environ)
+    e.pop("TRACK2_ARTIFACTS", None)
+    if env_value is not None:
+        e["TRACK2_ARTIFACTS"] = env_value
+    r = _sp.run([sys.executable, "-c", _PROBE], capture_output=True, text=True, env=e)
+    return r.returncode, r.stdout.strip(), r.stderr.strip()
+
+_rc, _default, _ = _root_with(None)
+check("with no override the store is the tracked repo directory",
+      _rc == 0 and _default == str(ROOT / "runs" / "artifacts"), _default)
+
+with tempfile.TemporaryDirectory(prefix="track2-artroot-") as _td:
+    _rc, _got, _ = _root_with(_td)
+    check("TRACK2_ARTIFACTS relocates the store", _rc == 0 and _got == _td, _got)
+
+    # The real proof: a tree written under the override must land there and leave the tracked
+    # directory untouched. Counting entries is what a `git status` hazard actually looks like.
+    _tracked = ROOT / "runs" / "artifacts"
+    _before = len(list(_tracked.iterdir())) if _tracked.is_dir() else 0
+    _write = "\n".join([
+        "import sys",
+        "sys.path.insert(0, %r)" % str(ROOT),
+        "from core import artifacts as A",
+        "a = A.put({'model.py': 'X = 1' + chr(10)})",
+        "print(a.tree)",
+        "print(a.path)",
+    ])
+    _e = dict(_os.environ); _e["TRACK2_ARTIFACTS"] = _td
+    _r = _sp.run([sys.executable, "-c", _write], capture_output=True, text=True, env=_e)
+    _lines = _r.stdout.strip().splitlines()
+    check("a candidate tree can be written under the override",
+          _r.returncode == 0 and len(_lines) == 2, (_r.stderr or _r.stdout)[:120])
+    if _r.returncode == 0 and len(_lines) == 2:
+        _tree, _path = _lines
+        check("the tree landed inside the scratch root", _path.startswith(_td), _path)
+        check("the tree is readable back from the scratch root",
+              (Path(_td) / _tree / "source").is_dir())
+    _after = len(list(_tracked.iterdir())) if _tracked.is_dir() else 0
+    check("the TRACKED store gained nothing", _before == _after, f"{_before} -> {_after}")
+
+_rc, _out, _err = _root_with("relative/not/absolute")
+check("a relative override is refused rather than scattering trees",
+      _rc != 0 and "absolute" in (_err + _out), (_err or _out)[-90:])
+
+# The wiring itself: run_all.sh must point the store at its own scratch tree and remove it.
+_ra = (ROOT / "tests" / "run_all.sh").read_text()
+check("run_all.sh exports TRACK2_ARTIFACTS", "export TRACK2_ARTIFACTS=" in _ra)
+check("run_all.sh puts the store inside its scratch dir",
+      'TRACK2_ARTIFACTS="$SCRATCH/artifacts"' in _ra)
+check("run_all.sh removes the scratch tree on normal exit", "trap cleanup EXIT" in _ra)
+check("run_all.sh removes it on interrupt and termination too",
+      "exit 130' INT" in _ra and "exit 143' TERM" in _ra)
+
 shutil.rmtree(TMP, ignore_errors=True)
 print()
 bad_l = [n for n, ok in R if not ok]

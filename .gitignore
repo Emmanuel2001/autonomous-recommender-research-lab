@@ -45,6 +45,11 @@ experiments/sweep_out.txt
 # that silently excluded the graded prediction file and the validation scores the scorer
 # signed -- so a judge cloning this repo could read a manifest full of hashes with nothing
 # to check them against. Re-included explicitly, by exact path, not by loosening the globs.
+# Test fixtures are SOURCE, not data. The portable-recommender fixture is a 20-row
+# synthetic CSV that four suites load; `*.csv` above silently excluded it, so a fresh clone
+# would fail those tests with a missing-file error rather than a useful one.
+!tests/fixtures/**/*.csv
+
 !submission_compliant/submission_test.csv
 !submission_compliant/valid_scores.npy
 !submission_research/submission_test.csv

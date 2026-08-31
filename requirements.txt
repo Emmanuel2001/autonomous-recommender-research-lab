@@ -1,5 +1,5 @@
-# The harness needs exactly two third-party packages. That is deliberate: the strategy the
-# agent writes is numpy-only, so the graded result needs no accelerator and no heavy stack.
+# The frozen submission needs exactly two third-party packages. That is deliberate: its
+# strategy is NumPy-only, so reproducing the graded result needs no accelerator or heavy stack.
 #
 #   python3 -m pip install -r requirements.txt
 #
@@ -13,8 +13,10 @@ pandas==3.0.1
 #
 #   anthropic        only for `--backend anthropic`. The default backend is `gemini`, which
 #                    talks HTTP directly and needs no SDK. Every recorded run used gemini.
-#   scipy, torch     only imported by strategy/mle_strategy.py, which belongs to the
-#                    SUPERSEDED task. Nothing on the current path imports them.
+#   scipy            imported only by strategy/mle_strategy.py (the superseded task).
+#   torch            required only by the optional accelerated research profile; install
+#                    requirements-accelerated.txt for CPU/MPS, or the appropriate CUDA
+#                    build from PyTorch on a GPU worker. The frozen submission stays NumPy.
 #
 # Packages the AGENT may request for a candidate are a separate, enforced allowlist in
 # agent/deps.py -- they are installed with `pip install --target` into a scratch directory,

@@ -85,7 +85,8 @@ def _hypothesis_properties() -> dict:
                                               "has materially changed"},
         "files_to_change": {"type": "array", "items": {"type": "string"}},
         "runtime_estimate": {"type": "string",
-                             "description": "rough fit time; this runs on a laptop CPU"},
+                             "description": "rough fit time and intended device; read the "
+                                            "live execution profile and capabilities"},
         "memory_estimate": {"type": "string"},
         "implementation_risk": {"type": "string"},
         "leakage_risk": {"type": "string",
@@ -400,8 +401,12 @@ Hard requirements on the SET, checked by the harness before anything is coded or
 If the set does not satisfy this, you will be asked once more with the specific deficiency,
 and if it still does not, the iteration is abandoned without spending an evaluation.
 
-This is a laptop CPU with numpy. A candidate must be fittable in minutes, so prefer a
-structured change over raw capacity. `information_value` matters: an experiment that settles
+The live task state contains `execution_profile` and measured `hardware_capabilities`.
+NumPy candidates run on CPU. Torch candidates may use CPU, Apple MPS or CUDA when the
+profile permits and the device is actually available. Do not claim an accelerator merely
+because it was requested; the harness records the resolved device. Keep every candidate
+inside the live wall-time and memory budget. Prefer a structured change over raw capacity
+when no accelerator is available. `information_value` matters: an experiment that settles
 an open question is worth more than one that might nudge the metric, because a decisive
 negative result removes a whole direction from future consideration.
 
@@ -434,7 +439,10 @@ CHAMPION TELEMETRY (self-reported)
 {_telemetry_view(parent_telemetry)}
 
 Rank every candidate and select exactly one to evaluate. Score each on evidence, expected
-impact, novelty, information value, CPU feasibility and implementation risk.
+impact, novelty, information value, available-hardware feasibility and implementation risk.
+The response field remains named `score_cpu_feasibility` for compatibility with signed
+historical ledgers; interpret it as execution-resource feasibility using the current
+CPU/MPS/CUDA capability record.
 
 `architecture_verdicts` is REQUIRED: one entry for EVERY `model_architecture` candidate,
 keyed by its exact id, each with `verdict` of "selected" or "rejected" and a reason. Rejecting
@@ -570,12 +578,14 @@ class ResearchAgent:
     def __init__(self, backend: str = "gemini", model: str | None = None,
                  api_key: str | None = None, base_url: str | None = None,
                  effort: str = "high", thinking_level: str | None = None,
+                 thinking_summaries: bool = False,
                  timeout: float = 600.0, max_retries: int = 2,
                  max_tokens: int = 32000,
                  planner_model: str | None = None, judge_model: str | None = None,
                  coder_model: str | None = None, reflector_model: str | None = None):
         self.backend, self.effort, self.max_tokens = backend, effort, max_tokens
         self.thinking_level = thinking_level
+        self.thinking_summaries = bool(thinking_summaries)
         self.timeout, self.max_retries, self.base_url = timeout, max_retries, base_url
         self.usage: list[dict] = []
         self._key = (api_key or os.environ.get("TRACK2_LLM_API_KEY")
@@ -622,7 +632,8 @@ class ResearchAgent:
             from agent.backends import make_backend
             be = make_backend(self.backend, api_key=self._key, model=want,
                               base_url=self.base_url,
-                              thinking_level=self.thinking_level)
+                              thinking_level=self.thinking_level,
+                              thinking_summaries=self.thinking_summaries)
             obj = ("backend", be, getattr(be, "model", want or "?"))
         self._clients[key] = obj
         return obj
@@ -684,6 +695,7 @@ class ResearchAgent:
             usage.update({k: u.get(k, 0) for k in
                           ("input_tokens", "output_tokens", "cache_read_input_tokens",
                            "cache_creation_input_tokens")})
+            usage["thought_summaries"] = list(u.get("thought_summaries") or [])
             usage["thinking_tokens"] = int(u.get("thinking_tokens")
                                            or u.get("total_thought_tokens") or 0)
             usage["stop_reason"] = u.get("stop_reason")

@@ -11,6 +11,12 @@ No command here contains a secret. Two things must be supplied from your environ
 
 ```bash
 python3 -m pip install -r requirements.txt      # numpy + pandas only
+
+# Optional research runtime for PyTorch candidates on CPU / Apple MPS
+python3 -m pip install -r requirements-accelerated.txt
+
+# On a CUDA worker, install the PyTorch build matched to that worker's CUDA runtime.
+# Do not assume the generic wheel has CUDA merely because the machine has a GPU.
 ```
 
 The dataset is **not** in this repository (CC BY-SA 4.0 — cite, do not redistribute). Place
@@ -105,11 +111,45 @@ python3 -u -m agent.research_driver \
 ```bash
 --seed-profile inherited   # research_workspace/  — pairwise switch present
 --seed-profile minimal     # research_workspace_minimal/ — pointwise only
+--seed-profile accelerated # research_workspace_accelerated/ — PyTorch CPU/MPS/CUDA
 ```
 
 Both are recorded in `run_start` with `seed_provenance`, which states by *parsed function
 name* whether pairwise, listwise or an alternative architecture was already present. That
 field is how an autonomy claim gets checked rather than believed.
+
+## 8A. Run accelerator-aware research
+
+First inspect what this exact Python process can use:
+
+```bash
+python3 -m core.execution
+```
+
+Prefer MPS/CUDA but record a CPU fallback:
+
+```bash
+python3 -u -m agent.research_driver \
+  --research-policy tournament --seed-profile accelerated \
+  --framework torch --device auto --accelerator-policy prefer \
+  --backend gemini --model gemini-3.5-flash-lite \
+  --iterations 6 --convergence official --run-name accelerated_auto
+```
+
+Require CUDA and refuse to pretend a fallback is equivalent:
+
+```bash
+python3 -u -m agent.research_driver \
+  --research-policy tournament --seed-profile accelerated \
+  --framework torch --device cuda --accelerator-policy require --no-device-fallback \
+  --isolation subprocess \
+  --backend gemini --model gemini-3.5-flash-lite \
+  --iterations 6 --convergence official --run-name cuda_required
+```
+
+For Docker CUDA isolation, provide a CUDA-capable PyTorch image and set
+`TRACK2_DOCKER_CUDA_IMAGE`; the harness adds `--gpus all`. Apple MPS is a host runtime and
+is deliberately refused under this Docker backend—use seatbelt/subprocess on the Mac.
 
 ## 9. Role-specific models
 
@@ -124,8 +164,62 @@ python3 -u -m agent.research_driver \
   --judge-model   gemini-3.5-flash \
   --coder-model   gemini-3.5-flash-lite \
   --reflector-model gemini-3.5-flash-lite \
+  --thought-summaries \
   --iterations 50 --convergence official --run-name tournament_routed
 ```
+
+`--thought-summaries` requests the provider's public summary when supported. The ledger and
+console label it as a provider summary, never private chain-of-thought. The hypothesis,
+judge ranking, code diff, signed metric and reflection remain visible for every backend.
+
+## 9A. Use the Research Console
+
+Start the scorer first, then in another terminal:
+
+```bash
+TRACK2_SOCKET="runs/my_run.sock" python3 -m agent.control --port 8787
+```
+
+Open the tokenized loopback URL printed in the terminal. The console can select the seed
+profile, task spec, role-specific LLM models, framework/device policy and budgets. It shows
+measured CPU/MPS/CUDA availability, live output, an auditable decision timeline, and a replay
+of a completed signed ledger. It holds no signing key and can run only one driver at a time.
+
+## 9B. Confirm and run a second recommender task
+
+The portable family currently supports CSV logged-impression binary ranking or global AUC
+with an integer time split. Drafting measures the files, proposes roles and validates them;
+`--confirm` writes a runnable JSON contract:
+
+```bash
+python3 -m agent.draft_task /path/to/data \
+  --goal "rank products within each account by conversion" \
+  --proposer gemini --model gemini-3.5-flash-lite \
+  --epsilon 0.002 --window 3 --confirm --out tasks/shop.json
+```
+
+Start a task-specific scorer in its own terminal:
+
+```bash
+TRACK2_SIGNING_KEY="$(cat secrets/scorer.key)" \
+TRACK2_LEDGER="runs/ledgers/shop.jsonl" TRACK2_SOCKET="runs/shop.sock" \
+python3 -u -m core.scorer serve --task-spec tasks/shop.json
+```
+
+Then point the same research loop at it:
+
+```bash
+TRACK2_SOCKET="runs/shop.sock" python3 -u -m agent.research_driver \
+  --task-spec tasks/shop.json --research-policy tournament \
+  --seed-profile accelerated --framework torch --device auto \
+  --backend gemini --model gemini-3.5-flash-lite \
+  --iterations 20 --convergence official --run-name shop_research
+```
+
+The included `tests/fixtures/portable_recommender/task.json` is the executable second-task
+proof: NumPy training, PyTorch training, physical held-out-label redaction and signed scoring
+are all exercised. A new metric family or non-CSV modality still requires a new audited
+loader/metric adapter; the platform does not claim arbitrary data support.
 
 ## 10. Generate the HTML report
 

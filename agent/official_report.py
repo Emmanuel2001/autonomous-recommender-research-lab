@@ -385,7 +385,9 @@ def _sec_evaluations(d: dict, baseline: float, sd: float) -> str:
     top = max(vals) if vals else None
     for i, (_seq, p) in enumerate(d["scores"]):
         m = p["metrics"]
-        dl = p.get("delta_vs_official_baseline")
+        # portable tasks record delta_vs_declared_baseline; official records keep the
+        # official key. Read both so one report renders either kind.
+        dl = p.get("delta_vs_official_baseline", p.get("delta_vs_declared_baseline"))
         if dl is None:
             dl = m["primary"] - baseline
         n_sd = dl / sd if sd else 0.0

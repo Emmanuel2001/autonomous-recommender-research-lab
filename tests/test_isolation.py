@@ -181,6 +181,27 @@ check("verify still reports the forgery",
 check("verify_on_open=False is available for a deliberate tamper demo",
       Ledger(f, k, verify_on_open=False) is not None)
 
+# ---- the artifact store is never writable, in EITHER path spelling -----------------
+# seatbelt matches the RESOLVED path. On macOS /var is a symlink to /private/var, so a deny
+# naming a TMPDIR path under /var/folders matches nothing -- the first version of this rule
+# did exactly that: the profile read correctly and a candidate still overwrote its own
+# source. Both spellings are asserted because only one of them is the one that bites.
+import tempfile as _tf
+with _tf.TemporaryDirectory(prefix="track2-artdeny-") as _td:
+    _store = Path(_td) / "artifacts"
+    _store.mkdir()
+    _prof = I.seatbelt_profile([], [], [Path(_td) / "out"], deny_write_dirs=[_store])
+    _tail = _prof.split("(deny file-write*")[-1]
+    _given, _resolved = str(_store), str(_store.resolve())
+    check("the artifact store is denied for writing", f'(subpath "{_given}")' in _tail)
+    if _resolved != _given:
+        check("the RESOLVED spelling is denied too (the one seatbelt matches)",
+              f'(subpath "{_resolved}")' in _tail, _tail[:160])
+    check("the deny follows the write allowance, so the later rule wins",
+          _prof.index(_given) > _prof.index("(allow file-write*"))
+    check("no artifact deny block is emitted when none is requested",
+          "{artifact_deny}" not in I.seatbelt_profile([], [], [Path(_td) / "out"]))
+
 print()
 print(f"  [diagnostic] seatbelt profile: {I.PROFILE_PATH}")
 print(f"  [diagnostic] probe results:    experiments/isolation_probe.json")

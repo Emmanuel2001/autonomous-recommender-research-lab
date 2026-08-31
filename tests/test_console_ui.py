@@ -226,6 +226,22 @@ check("viewport meta present for small screens", "width=device-width" in page)
 check("the page declares a language", "<html lang=en>" in page)
 check("no literal double-escaped entity survives", "&amp;mdash;" not in page)
 
+print("== architecture discovery is visible and cannot look official")
+new_run = UI.view_newrun("tok")
+check("new-run form exposes search mode", "name=search_mode" in new_run)
+check("new-run form has an architecture discovery preset",
+      "data-preset=discovery" in new_run and "Architecture discovery" in new_run)
+check("discovery preset spends 12 iterations with convergence off",
+      "discovery:{iterations:'12',convergence:'off'" in page)
+disc_entries = synthetic()
+disc_entries[1]["payload"]["body"]["search_mode"] = "discovery"
+disc_entries[1]["payload"]["body"]["evidence_class"] = "diagnostic_discovery"
+disc = text_of(UI.view_overview(UI.digest(disc_entries), "finished", False)).lower()
+check("a discovery run is labelled diagnostic in the overview",
+      "architecture discovery" in disc and "diagnostic evidence" in disc)
+check("the discovery overview says official confirmation remains separate",
+      "cannot replace a separate official confirmation run" in disc)
+
 print("== the console never claims to hold a signing key")
 check("the masthead states no signing key is held", "no signing key" in text_of(page).lower())
 check("integrity view points at the external verify command",

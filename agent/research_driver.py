@@ -69,9 +69,62 @@ MAX_REPAIRS = 3
 #: Leave room in a 12,288-byte record for everything that is NOT the diff.
 INLINE_DIFF_BUDGET = 6000
 
+# Standard keeps the recorded/official search behaviour. Discovery is an explicit,
+# non-submittable diagnostic policy that spends a fixed budget on a broader search and
+# guarantees that architecture is funded once rather than merely mentioned.
+SEARCH_MODES = ("standard", "discovery")
+DISCOVERY_ARCHITECTURE_DEADLINE = 3
+
 
 # --------------------------------------------------------------------------- helpers
-def validate_tournament(out: dict, size: int) -> tuple[list, dict]:
+def discovery_architecture_required(search_mode: str, iteration: int,
+                                    architecture_selected: int) -> bool:
+    """Whether the discovery judge must fund architecture on this decision.
+
+    The first two decisions remain genuine choices. If neither selected architecture, the
+    third cannot pass another lane. Once architecture has been funded, later decisions are
+    unconstrained. Standard runs never enter this policy.
+    """
+    return (search_mode == "discovery"
+            and architecture_selected == 0
+            and iteration >= DISCOVERY_ARCHITECTURE_DEADLINE)
+
+
+def require_compatible_search_ledger(path: str | Path, search_mode: str) -> None:
+    """Refuse to mix discovery and standard runs in one signed chain.
+
+    A `diagnostic` label is not enough if the entries sit beside official evidence and a UI
+    can accidentally summarize them together. Historical run_start records predate
+    `search_mode`, so absence means standard. Multiple runs of the same class may share a
+    chain deliberately; crossing the evidence classes may not.
+    """
+    if not path:
+        raise ValueError("the scorer did not report its ledger path")
+    p = Path(path)
+    if not p.is_file():
+        return
+    modes = set()
+    try:
+        for line in p.read_text().splitlines():
+            if not line.strip():
+                continue
+            entry = json.loads(line)
+            payload = entry.get("payload") or {}
+            if payload.get("kind") != "run_start":
+                continue
+            body = payload.get("body") or {}
+            modes.add(str(body.get("search_mode") or "standard"))
+    except (OSError, ValueError) as exc:
+        raise ValueError(f"cannot inspect scorer ledger {p}: {exc}") from None
+    incompatible = sorted(m for m in modes if m != search_mode)
+    if incompatible:
+        raise ValueError(
+            f"scorer ledger {p} already contains {incompatible} run_start evidence; "
+            f"refusing to append {search_mode!r}. Discovery and standard runs require "
+            f"separate scorer processes, sockets and ledgers.")
+
+
+def validate_tournament(out: dict, size: int, *, discovery: bool = False) -> tuple[list, dict]:
     """Normalise a tournament and decide whether its coverage is ACCEPTABLE.
 
     Coverage is now enforced, not merely reported. The rules, in the order a reader would
@@ -127,6 +180,21 @@ def validate_tournament(out: dict, size: int) -> tuple[list, dict]:
     if unknown_lane:
         problems.append(
             f"candidates {unknown_lane} declare a lane outside {list(LANES)}")
+    if discovery:
+        for c in (c for c in cands if c["lane"] == "model_architecture"):
+            cid = c["id"]
+            files = [str(x) for x in (c.get("files_to_change") or [])]
+            if "model.py" not in files:
+                problems.append(
+                    f"discovery architecture candidate {cid} must include model.py in "
+                    f"files_to_change; a config-only capacity change is not architecture")
+            if len(str(c.get("model_family") or "").strip()) < 3:
+                problems.append(
+                    f"discovery architecture candidate {cid} needs a named model_family")
+            if len(str(c.get("architecture_change") or "").strip()) < 10:
+                problems.append(
+                    f"discovery architecture candidate {cid} needs an architecture_change "
+                    f"describing the structural model.py edit")
 
     return cands, {
         "size_requested": size, "size_returned": len(cands),
@@ -138,13 +206,14 @@ def validate_tournament(out: dict, size: int) -> tuple[list, dict]:
         "missing_required_lanes": missing_required,
         "duplicate_lanes": dup_lanes,
         "unknown_lane_candidates": unknown_lane,
+        "discovery_architecture_contract": discovery,
         "problems": problems,
         "lane_coverage_ok": not problems,
         "coverage_note": str(out.get("lane_coverage_note") or "")[:400],
     }
 
 
-def validate_judge(cands: list, verdict: dict) -> list:
+def validate_judge(cands: list, verdict: dict, *, require_architecture: bool = False) -> list:
     """Return the list of problems with a judge response. Empty means acceptable.
 
     Checked exactly, because every one of these has a silent-failure mode. A ranking that
@@ -205,6 +274,10 @@ def validate_judge(cands: list, verdict: dict) -> list:
             problems.append(
                 f"{sel} was selected but its architecture verdict says "
                 f"{chosen[0].get('verdict')!r}")
+    if require_architecture and sel not in arch:
+        problems.append(
+            "discovery architecture floor is due now: selected_id must name a genuine "
+            f"model_architecture candidate, one of {arch}")
     return problems
 
 
@@ -262,6 +335,8 @@ def candidate_to_plan(cand: dict) -> dict:
         "information_value": cand.get("information_value", ""),
         "novelty_vs_history": cand.get("novelty_vs_history", ""),
         "leakage_risk": cand.get("leakage_risk", ""),
+        "model_family": cand.get("model_family", ""),
+        "architecture_change": cand.get("architecture_change", ""),
         "_candidate_id": cand.get("id"),
     }
 
@@ -378,7 +453,8 @@ def research_loop(*, agent, splits, edges, spec, state: ResearchState, budget: B
                   workspace: Path | None = None,
                   max_coverage_repairs: int = 1,
                   execution_profile=None,
-                  task_spec_path: str | Path | None = None) -> dict:
+                  task_spec_path: str | Path | None = None,
+                  search_mode: str = "standard") -> dict:
     """Run the loop. `rec` and `score` are injected so this is testable against a fake
     scorer as well as the real one.
 
@@ -388,6 +464,17 @@ def research_loop(*, agent, splits, edges, spec, state: ResearchState, budget: B
     def say(msg: str) -> None:
         if verbose:
             print(msg, flush=True)
+
+    if search_mode not in SEARCH_MODES:
+        raise ValueError(f"unknown search_mode {search_mode!r}; expected {SEARCH_MODES}")
+    if search_mode == "discovery":
+        if policy != "tournament":
+            raise ValueError("discovery search requires policy='tournament'")
+        if convergence != "off":
+            raise ValueError("discovery search requires convergence='off'")
+        if budget.max_iterations < 3:
+            raise ValueError("discovery search needs at least 3 iterations so its "
+                             "architecture funding floor can be satisfied")
 
     def record_public_thoughts(role: str, usage: dict, iteration: int, stage: str) -> None:
         """Record provider-authored summaries when available, never hidden reasoning."""
@@ -557,7 +644,20 @@ def research_loop(*, agent, splits, edges, spec, state: ResearchState, budget: B
                 },
                 "stages_attempted_recently": [
                     e.stage for e in state.experiments[-6:] if e.stage],
+                "search_mode": search_mode,
             }
+            architecture_due = discovery_architecture_required(
+                search_mode, it_no, stats["architecture_selected"])
+            if search_mode == "discovery":
+                state.budget["discovery"] = {
+                    "evidence_class": "diagnostic_non_submittable",
+                    "architecture_selection_deadline": DISCOVERY_ARCHITECTURE_DEADLINE,
+                    "architecture_selected_so_far": stats["architecture_selected"],
+                    "architecture_required_now": architecture_due,
+                    "note": ("fund at least one genuine model.py architecture change by "
+                             "the third discovery decision; failures remain evidence and "
+                             "the incumbent remains the safe fallback"),
+                }
             # The PARENT of this iteration's candidate. Starts as the champion and may be
             # reassigned below if the plan asks to fork an earlier candidate instead, which
             # is why it is not called champ_tree.
@@ -584,7 +684,9 @@ def research_loop(*, agent, splits, edges, spec, state: ResearchState, budget: B
                                       usage.get("output_tokens", 0),
                                       usage.get("thinking_tokens", 0))
                         record_public_thoughts("plan", usage, it_no, "tournament")
-                        cands, cov = validate_tournament(traw, tournament_size)
+                        cands, cov = validate_tournament(
+                            traw, tournament_size,
+                            discovery=(search_mode == "discovery"))
                         if cov["lane_coverage_ok"]:
                             break
                         stats["lane_coverage_violations"] += 1
@@ -623,7 +725,8 @@ def research_loop(*, agent, splits, edges, spec, state: ResearchState, budget: B
                                       usage.get("output_tokens", 0),
                                       usage.get("thinking_tokens", 0))
                         record_public_thoughts("judge", usage, it_no, "judge")
-                        jproblems = validate_judge(cands, verdict)
+                        jproblems = validate_judge(
+                            cands, verdict, require_architecture=architecture_due)
                         if not jproblems:
                             break
                         stats["judge_violations"] += 1
@@ -659,12 +762,15 @@ def research_loop(*, agent, splits, edges, spec, state: ResearchState, budget: B
                             f"{cov['missing_required_lanes']} (recorded, not hidden)")
                     tourn_meta = {
                         "coverage": cov, "selection_how": how,
+                        "search_mode": search_mode,
+                        "architecture_selection_required": architecture_due,
                         "selected_id": plan.get("_candidate_id"),
                         "candidates": [
                             {k: c.get(k) for k in
                              ("id", "lane", "hypothesis", "mechanism",
                               "expected_direction", "expected_magnitude",
                               "information_value", "novelty_vs_history",
+                              "model_family", "architecture_change",
                               "files_to_change", "runtime_estimate",
                               "implementation_risk", "leakage_risk")}
                             for c in cands],
@@ -1139,6 +1245,11 @@ def build_parser() -> argparse.ArgumentParser:
                          "across every research lane and has a judge pick one; 'single' is "
                          "the original one-hypothesis-per-iteration policy, kept for "
                          "reproduction of the recorded runs.")
+    ap.add_argument(
+        "--search-mode", default="standard", choices=list(SEARCH_MODES),
+        help="'standard' preserves the official/recorded search policy. 'discovery' is "
+             "an explicitly non-submittable tournament run with convergence off and an "
+             "architecture selection floor by its third iteration.")
     ap.add_argument("--tournament-size", type=int, default=6,
                     help="candidates requested per tournament. The MINIMUM is 6 -- one per "
                          "research lane -- because a smaller set cannot cover them and the "
@@ -1187,6 +1298,15 @@ def main() -> None:
                 f"--research-policy single.")
         if a.tournament_size > 12:
             raise SystemExit(f"--tournament-size {a.tournament_size} exceeds the maximum 12")
+    if a.search_mode == "discovery":
+        if a.research_policy != "tournament":
+            raise SystemExit("--search-mode discovery requires --research-policy tournament")
+        if a.convergence != "off":
+            raise SystemExit("--search-mode discovery requires --convergence off. Discovery "
+                             "is separate diagnostic search, not official evidence.")
+        if a.iterations < 3:
+            raise SystemExit("--search-mode discovery requires at least 3 iterations so "
+                             "the architecture funding floor can be satisfied")
     # ---- optional seed override, validated against the committed config's own keys
     seed_files, seed_note = None, ""
     if a.seed_config:
@@ -1224,7 +1344,10 @@ def main() -> None:
     try:
         require_task(ping, spec.slug if a.task_spec else "official")
         require_verified_chain(ping)
+        require_compatible_search_ledger(ping.get("ledger"), a.search_mode)
     except HandshakeError as e:
+        raise SystemExit(str(e)) from None
+    except ValueError as e:
         raise SystemExit(str(e)) from None
     print(f"[research] scorer task={ping['task']} "
           f"manifest {str(ping.get('manifest_sha256',''))[:16]} "
@@ -1271,6 +1394,14 @@ def main() -> None:
     if not provenance.get("official_numpy_seed") and not seed_note:
         seed_note = ("accelerated PyTorch reference profile; this is NOT the byte-identical "
                      "official NumPy baseline")
+    official_evidence = (
+        a.search_mode == "standard"
+        and a.convergence == "official"
+        and not bool(seed_note)
+        and bool(provenance.get("official_numpy_seed", False)))
+    evidence_class = ("diagnostic_discovery" if a.search_mode == "discovery"
+                      else "official_candidate" if official_evidence
+                      else "diagnostic")
     print(f"[research] seed profile {a.seed_profile!r} ({ws.name}): "
           f"pairwise_present={provenance['pairwise_code_present']} "
           f"listwise_present={provenance['listwise_code_present']} "
@@ -1283,7 +1414,7 @@ def main() -> None:
                           thinking_summaries=a.thought_summaries,
                           planner_model=a.planner_model, judge_model=a.judge_model,
                           coder_model=a.coder_model, reflector_model=a.reflector_model)
-    print(f"[research] policy={a.research_policy}"
+    print(f"[research] policy={a.research_policy} search_mode={a.search_mode}"
           + (f" size={a.tournament_size}" if a.research_policy == "tournament" else "")
           + f"  model routing: {agent.routing()}")
 
@@ -1324,6 +1455,9 @@ def main() -> None:
         "hardware_capabilities": capabilities,
         "contract_sha256": CAND.contract_sha256(ws),
         "research_policy": a.research_policy,
+        "search_mode": a.search_mode,
+        "evidence_class": evidence_class,
+        "submittable": official_evidence,
         "tournament_size": (a.tournament_size if a.research_policy == "tournament" else 0),
         "model_routing": agent.routing(),
         "seed_profile": a.seed_profile,
@@ -1347,7 +1481,8 @@ def main() -> None:
             seed_files=seed_files, seed_note=seed_note,
             policy=a.research_policy, tournament_size=a.tournament_size,
             workspace=ws, max_coverage_repairs=a.max_coverage_repairs,
-            execution_profile=execution_profile, task_spec_path=a.task_spec)
+            execution_profile=execution_profile, task_spec_path=a.task_spec,
+            search_mode=a.search_mode)
     finally:
         state.save(state_path)
 
@@ -1359,6 +1494,9 @@ def main() -> None:
                     "beliefs": state.beliefs,
                     "seed_profile": a.seed_profile,
                     "research_policy": a.research_policy,
+                    "search_mode": a.search_mode,
+                    "evidence_class": evidence_class,
+                    "submittable": official_evidence,
                     "execution_profile": execution_profile.to_dict(),
                     "hardware_capabilities": capabilities,
                     "manual_interventions": state.manual_interventions})

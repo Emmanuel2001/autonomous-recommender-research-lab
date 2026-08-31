@@ -83,6 +83,14 @@ def _hypothesis_properties() -> dict:
                                "description": "how this differs from what has been tried; "
                                               "if it revisits a rejected mechanism, what "
                                               "has materially changed"},
+        "model_family": {
+            "type": "string",
+            "description": "For model_architecture candidates: the resulting model "
+                           "family, not merely a width or embedding dimension."},
+        "architecture_change": {
+            "type": "string",
+            "description": "For model_architecture candidates: the structural change "
+                           "to model.py that makes this a different architecture."},
         "files_to_change": {"type": "array", "items": {"type": "string"}},
         "runtime_estimate": {"type": "string",
                              "description": "rough fit time and intended device; read the "
@@ -240,7 +248,9 @@ def code_schema() -> dict:
             "dependencies": {
                 "type": "array", "maxItems": 4, "items": {"type": "string"},
                 "description": "Extra packages needed. Must be on the harness allowlist; "
-                               "anything else is refused before the fit runs."},
+                               "anything else is refused before the fit runs. Also put "
+                               "'# requires: package-name' in a returned Python file, "
+                               "because source declarations drive dependency resolution."},
         },
     }
 
@@ -309,6 +319,12 @@ def _contract_text() -> str:
 
 
 def _rules_block(task: dict) -> str:
+    # The harness has always enforced this allowlist, but the model was only told that an
+    # allowlist existed -- not what was on it. That made viable tree/neural alternatives
+    # invisible at planning time and then penalised them as implementation risks at judging
+    # time. Keep the enforcement in agent/deps.py; expose the same source of truth here.
+    from agent.deps import ALLOWLIST
+    allowed = ", ".join(sorted(ALLOWLIST))
     return f"""You are the research engine of an autonomous ML research agent.
 
 THE TASK
@@ -323,7 +339,7 @@ RULES THAT ARE ENFORCED, NOT ADVISORY
   * The held-out split's labels are not in the process. Do not try to reach them; the
     kernel denies it and the attempt is recorded.
   * Every candidate runs sandboxed with no network. Extra packages must be declared and
-    must be on the allowlist.
+    must be on the allowlist. The permitted package names are: {allowed}.
   * The number that decides anything is produced by a separate signing scorer. Your own
     metric calls are for early stopping and for the train/dev curve.
   * A tree identical to one already evaluated is refused for free -- vary something real.
@@ -413,6 +429,25 @@ negative result removes a whole direction from future consideration.
 Read `beliefs` before proposing. If a candidate revisits a mechanism already recorded as
 unhelpful, `novelty_vs_history` must say what has materially changed -- otherwise do not
 propose it."""
+    discovery = (state.get("budget", {}).get("search_mode") == "discovery")
+    if discovery:
+        user += """
+
+DISCOVERY MODE IS ACTIVE. This is a deliberately non-submittable diagnostic search with
+convergence disabled. Broaden the scientific search; do not protect the incumbent merely
+because it is already working.
+
+For every `model_architecture` candidate:
+  * `files_to_change` MUST include `model.py`;
+  * provide a non-empty `model_family` and `architecture_change`;
+  * changing only embedding width, rank, a config constant, learning rate, loss, sampling,
+    or regularisation is NOT an architecture experiment.
+
+Plausible directions supported by the allowlist include boosted trees (LightGBM/XGBoost),
+neural interaction models such as DeepFM or DCN-style crosses in torch, multitask models,
+and ensembles. These are examples, not a mandatory menu: propose what the task evidence
+supports. A failed architecture attempt is useful evidence and may fall back to the current
+champion on the next iteration; do not disguise it as a smaller config tweak."""
     if deficiency:
         user += ("\n\nYOUR PREVIOUS SET WAS REFUSED. Fix exactly these problems and return a "
                  "complete set:\n  * " + "\n  * ".join(str(d) for d in deficiency)
@@ -446,9 +481,10 @@ CPU/MPS/CUDA capability record.
 
 `architecture_verdicts` is REQUIRED: one entry for EVERY `model_architecture` candidate,
 keyed by its exact id, each with `verdict` of "selected" or "rejected" and a reason. Rejecting
-architecture work is a legitimate judgement -- this project's champion keeps a fixed
-Factorization Machine and that was the right call so far. Passing over a candidate in silence
-is not, and a missing or unrecognised id is refused before anything runs.
+architecture work can be a legitimate judgement, but the incumbent architecture is evidence,
+not a mandate. Judge architecture by the same evidence, information-value, feasibility and
+risk criteria as every other lane. Passing over a candidate in silence is not legitimate,
+and a missing or unrecognised id is refused before anything runs.
 
 `ranking` must list EVERY candidate exactly once, with unique consecutive ranks starting at 1,
 and no id that is not in the tournament. `selected_id` must be one of them.
@@ -459,6 +495,19 @@ so two smaller improvements can be enough. If there is plenty of budget, an info
 experiment that may lose is the better spend.
 
 Say whether you are exploiting established evidence or exploring uncertainty."""
+    discovery = state.get("budget", {}).get("discovery") or {}
+    if state.get("budget", {}).get("search_mode") == "discovery":
+        user += f"""
+
+DISCOVERY POLICY
+This run exists to test broader model families and is not official submission evidence.
+An architecture candidate must be funded within the first three discovery iterations.
+Architecture selections so far: {int(discovery.get('architecture_selected_so_far', 0))}.
+Selection deadline: iteration {int(discovery.get('architecture_selection_deadline', 3))}.
+Architecture required on THIS decision: {bool(discovery.get('architecture_required_now'))}.
+When that final value is true, select a genuine `model_architecture` candidate. The harness
+will refuse and request a corrected verdict if you do not. This exploration floor is
+recorded policy, not an undisclosed override."""
     if problems:
         user += ("\n\nYOUR PREVIOUS RESPONSE WAS REFUSED. Fix exactly these problems:\n  * "
                  + "\n  * ".join(str(x) for x in problems)
@@ -487,7 +536,12 @@ THE PARENT SOURCE YOU ARE EDITING
     if error is None:
         tail = """Return whole replacement files for everything you change. Omit a file to
 inherit the parent's copy. Change only what the hypothesis needs -- a candidate that
-changes four things at once cannot attribute its own result."""
+changes four things at once cannot attribute its own result.
+
+If the candidate needs an allowed package that is not already part of the seed, name it in
+`dependencies` AND add an exact `# requires: package-name` comment to one returned Python
+file. The harness resolves only these source declarations outside the network-denied sandbox;
+an import or a `dependencies` field alone does not install anything."""
     else:
         tail = f"""YOUR PREVIOUS ATTEMPT FAILED. This is repair attempt {attempt}.
 

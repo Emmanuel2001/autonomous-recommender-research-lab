@@ -65,6 +65,7 @@ ISOLATION = ("seatbelt", "docker", "subprocess", "none")
 DRIVERS = ("official", "research")
 BACKENDS = ("gemini", "ollama", "groq", "anthropic")
 RESEARCH_POLICIES = ("tournament", "single")
+SEARCH_MODES = ("standard", "discovery")
 SEED_PROFILES = ("inherited", "minimal", "accelerated")
 FRAMEWORKS = ("auto", "numpy", "torch")
 DEVICES = ("auto", "cpu", "mps", "cuda")
@@ -133,6 +134,7 @@ class Spec:
     max_wall_seconds: float = 21_600.0
     max_repairs: int = 3
     research_policy: str = "tournament"
+    search_mode: str = "standard"
     tournament_size: int = 6
     max_coverage_repairs: int = 1
     seed_profile: str = "inherited"
@@ -163,6 +165,7 @@ class Spec:
                   "--max-repairs", str(self.max_repairs),
                   "--max-tokens", str(self.max_tokens),
                   "--research-policy", self.research_policy,
+                  "--search-mode", self.search_mode,
                   "--tournament-size", str(self.tournament_size),
                   "--max-coverage-repairs", str(self.max_coverage_repairs),
                   "--seed-profile", self.seed_profile,
@@ -274,6 +277,7 @@ def parse(form: dict) -> Spec:
     s.backend = _enum(form, "backend", BACKENDS, s.backend)
     s.research_policy = _enum(
         form, "research_policy", RESEARCH_POLICIES, s.research_policy)
+    s.search_mode = _enum(form, "search_mode", SEARCH_MODES, s.search_mode)
     s.seed_profile = _enum(form, "seed_profile", SEED_PROFILES, s.seed_profile)
     s.framework = _enum(form, "framework", FRAMEWORKS, s.framework)
     s.device = _enum(form, "device", DEVICES, s.device)
@@ -346,6 +350,17 @@ def parse(form: dict) -> Spec:
     if s.driver == "research":
         if s.backend != "ollama" and not s.model:
             raise LaunchRefused(f"backend {s.backend!r} needs an explicit --model")
+        if s.search_mode == "discovery":
+            if s.research_policy != "tournament":
+                raise LaunchRefused("discovery search requires research_policy=tournament")
+            if s.convergence != "off":
+                raise LaunchRefused("discovery search requires convergence=off; it is "
+                                    "diagnostic evidence, not an official run")
+            if s.iterations < 3:
+                raise LaunchRefused("discovery search requires at least 3 iterations for "
+                                    "the architecture funding floor")
+    elif s.search_mode != "standard":
+        raise LaunchRefused("search_mode applies only to the code-first research loop")
     elif s.proposer != "random" and not s.model:
         raise LaunchRefused(f"proposer {s.proposer!r} needs an explicit --model")
     if s.patch_isolation == "none":

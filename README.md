@@ -170,6 +170,36 @@ These are platform capability tests, not new leaderboard evidence. **This engine
 established no new leaderboard improvement.** The submitted champion, prediction file and
 signed historical ledgers are not rebuilt by it.
 
+### Architecture discovery is now a separate, opt-in policy
+
+The official path remains conservative and reproducible. A second search mode now exists for
+the broader question the historical runs did not answer:
+
+* `--search-mode discovery` is accepted only with the tournament policy, at least three
+  iterations and `--convergence off`; its ledger is marked `diagnostic_discovery` and
+  `submittable: false`;
+* the planner sees the real approved dependency list (`lightgbm`, `xgboost`, `torch`,
+  `implicit`, scikit-learn and the baseline numerical libraries) instead of merely being
+  told that an unnamed allowlist exists;
+* a discovery architecture candidate must name its model family and structural change and
+  must edit `model.py`. Changing only embedding width or another config constant no longer
+  counts as architecture;
+* the first two discovery selections remain open. If neither funds architecture, the third
+  judge decision must do so. This floor and any corrected judge verdict are recorded rather
+  than silently overridden;
+* the incumbent remains the safe fallback after a failed fit. The failure is retained as
+  evidence, and any discovery winner must return to a separate standard run with official
+  convergence and multi-seed confirmation.
+
+The Research Console exposes this as an **Architecture discovery** preset: 12 evaluations,
+eight hypotheses per tournament, convergence disabled and the minimal seed profile. Role
+routing remains explicit so a stronger planner/judge can be paired with cheaper coder and
+reflector calls. Selecting the preset only fills the form; it does not spend API credits.
+
+This is implemented and tested policy, not a new result. **No real LLM has run discovery mode
+yet, and no boosted-tree, DeepFM, DCN or ensemble candidate has been shown to beat the shipped
+champion.** Those families are now reachable directions, not claims.
+
 ## 11. What real LLM runs have done, and what they have not
 
 Three real runs now exist. Their ledgers are separate on purpose: a **diagnostic** run that
@@ -223,7 +253,8 @@ So the repository still separates a **capability** from the **behaviour** observ
 ## 12. Honest limitations
 
 * Only the cheapest model tier (`gemini-3.5-flash-lite`, 500 requests/day) has ever driven
-  this loop. Whether a stronger tier reaches for architecture is untested.
+  the recorded runs. Whether a stronger planner/judge produces better research decisions is
+  untested; the discovery policy makes that comparison possible but does not pre-answer it.
 * The research policy is **high-variance**: across the seven official-convergence runs in
   these ledgers (excluding the one-iteration smoke test), **4 beat the baseline and 3 did
   not** — `research_live1`, `trial_2`, `trial_4` and `research_submission1` improved on it;

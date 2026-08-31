@@ -106,6 +106,43 @@ python3 -u -m agent.research_driver \
   --iterations 50 --convergence official --run-name tournament_minimal
 ```
 
+### 7A. Architecture discovery (diagnostic, never the official submission run)
+
+Discovery is opt-in. It removes the incumbent-FM preference from judging, tells the planner
+which approved libraries actually exist, rejects config-only changes masquerading as model
+architecture, and requires one genuine `model.py` architecture selection by the third
+decision. The first two selections remain the judge's choice. A failed candidate falls back
+to the unchanged champion on the next iteration and remains in the signed evidence.
+
+Use a **separate scorer process, socket and ledger** from an official run. Start that scorer
+as in section 3, with `runs/ledgers/architecture_discovery.jsonl` and
+`runs/architecture_discovery.sock`, then run:
+
+```bash
+set -a; . ./.env; set +a
+TRACK2_SOCKET="runs/architecture_discovery.sock" \
+python3 -u -m agent.research_driver \
+  --search-mode discovery \
+  --research-policy tournament --tournament-size 8 \
+  --seed-profile minimal \
+  --backend gemini \
+  --model gemini-3.5-flash-lite \
+  --planner-model gemini-3.5-flash \
+  --judge-model gemini-3.5-flash \
+  --coder-model gemini-3.5-flash-lite \
+  --reflector-model gemini-3.5-flash-lite \
+  --framework auto --device auto --accelerator-policy prefer \
+  --iterations 12 --convergence off \
+  --max-tokens 2500000 --run-name architecture_discovery1
+```
+
+This command can consider LightGBM, XGBoost, torch neural interaction models, multitask
+models and ensembles because those dependencies are visible to the planner and enforced by
+the harness allowlist. They are examples, not a hard-coded menu. The ledger marks this run
+`diagnostic_discovery` and `submittable: false`. Any winner still needs a new standard run
+with `--convergence official` and multi-seed confirmation before it becomes a submission
+candidate. No discovery run is launched by setup or by selecting the console preset.
+
 ## 8. Seed profiles
 
 ```bash
@@ -183,7 +220,10 @@ TRACK2_SOCKET="runs/my_run.sock" python3 -m agent.control --port 8787
 Open the tokenized loopback URL printed in the terminal. The console can select the seed
 profile, task spec, role-specific LLM models, framework/device policy and budgets. It shows
 measured CPU/MPS/CUDA availability, live output, an auditable decision timeline, and a replay
-of a completed signed ledger. It holds no signing key and can run only one driver at a time.
+of a completed signed ledger. The **Architecture discovery** preset fills the diagnostic
+settings above but does not launch until you press Launch; use the strongest available model
+for planner/judge and a cheaper model for coder/reflector. The console labels discovery runs
+as non-official evidence. It holds no signing key and can run only one driver at a time.
 
 ## 9B. Confirm and run a second recommender task
 

@@ -261,13 +261,19 @@ JS = """
   var P={
     smoke:{iterations:'1',convergence:'off',tournament_size:'6',max_tokens:'120000',
            max_wall_seconds:'900',research_policy:'tournament',framework:'auto',
-           device:'auto',accelerator_policy:'prefer'},
+           device:'auto',accelerator_policy:'prefer',search_mode:'standard'},
     mps:{iterations:'6',convergence:'off',tournament_size:'6',max_tokens:'400000',
          max_wall_seconds:'3600',research_policy:'tournament',framework:'torch',
-         device:'mps',accelerator_policy:'prefer',seed_profile:'accelerated'},
+         device:'mps',accelerator_policy:'prefer',seed_profile:'accelerated',
+         search_mode:'standard'},
+    discovery:{iterations:'12',convergence:'off',tournament_size:'8',max_tokens:'2500000',
+              max_wall_seconds:'21600',research_policy:'tournament',framework:'auto',
+              device:'auto',accelerator_policy:'prefer',seed_profile:'minimal',
+              search_mode:'discovery'},
     official:{iterations:'50',convergence:'official',tournament_size:'6',
               max_wall_seconds:'21600',research_policy:'tournament',framework:'auto',
-              device:'auto',accelerator_policy:'prefer',seed_profile:'inherited'}
+              device:'auto',accelerator_policy:'prefer',seed_profile:'inherited',
+              search_mode:'standard'}
   };
   [].slice.call(document.querySelectorAll('[data-preset]')).forEach(function(b){
     b.addEventListener('click',function(){
@@ -398,6 +404,7 @@ def view_overview(d: dict, run_state: str, scorer_ready: bool) -> str:
     dev = esc(ex.get("resolved") or "not recorded")
     strip = [
         ("run status", run_state),
+        ("search mode", dash(d["start"].get("search_mode") or "standard")),
         ("task", dash(d["start"].get("task"))),
         ("llm / model", dash(", ".join(str(x) for x in models if x))),
         ("framework", dash(ex.get("framework"))),
@@ -409,6 +416,13 @@ def view_overview(d: dict, run_state: str, scorer_ready: bool) -> str:
     ]
     strip_html = "".join(f"<div class=cell><div class=k>{k}</div><div class=v>{v}</div></div>"
                          for k, v in strip)
+    evidence_note = ""
+    if d["start"].get("search_mode") == "discovery":
+        evidence_note = (
+            "<div class='note warn'><b>Architecture discovery.</b> This run disables the "
+            "official convergence rule and funds a genuine model.py architecture by its "
+            "third decision. It is diagnostic evidence and cannot replace a separate "
+            "official confirmation run.</div>")
 
     gs, gd = m["gain_vs_seed"], m["gain_vs_declared"]
     cards = [
@@ -467,7 +481,7 @@ def view_overview(d: dict, run_state: str, scorer_ready: bool) -> str:
             f"<h2>One research run, completely traceable.</h2>"
             f"<p class=sub>Read the result first, then follow every decision back to signed evidence.</p>"
             f"</div></div>{journey}"
-            f"<h2>Run facts</h2><div class=strip>{strip_html}</div>"
+            f"{evidence_note}<h2>Run facts</h2><div class=strip>{strip_html}</div>"
             f"{scorer_note}{verdict}"
             f"<h2>Research economy</h2><div class=metrics>{cards_html}</div>"
             f"<p class=sub>Every figure above is read from the signed ledger. "
@@ -795,6 +809,8 @@ def view_newrun(token: str) -> str:
         ]),
         ("Research strategy", True, [
             _sel("research_policy", ["tournament", "single"], "tournament"),
+            _sel("search_mode", ["standard", "discovery"], "standard",
+                 "discovery funds a real architecture by iteration 3 and is non-submittable"),
             _txt("tournament_size", "6", "minimum 6 &mdash; one per lane", "number"),
             _sel("convergence", ["official", "off"], "official",
                  "official = the organisers' stopping rule"),
@@ -803,8 +819,8 @@ def view_newrun(token: str) -> str:
         ("Models and roles", False, [
             _sel("backend", ["gemini", "ollama", "groq", "anthropic"], "gemini"),
             _txt("model", "gemini-3.5-flash-lite", "default for every role"),
-            _txt("planner_model", "", "falls back to model"),
-            _txt("judge_model", "", "falls back to model"),
+            _txt("planner_model", "", "use the strongest available reasoning model for discovery"),
+            _txt("judge_model", "", "use the strongest available reasoning model for discovery"),
             _txt("coder_model", "", "falls back to model"),
             _txt("reflector_model", "", "falls back to model"),
             _sel("thinking_level", ["", "low", "high"], ""),
@@ -851,6 +867,7 @@ def view_newrun(token: str) -> str:
         f"<div class=presets>"
         f"<button type=button class='btn ghost' data-preset=smoke>Quick smoke test</button>"
         f"<button type=button class='btn ghost' data-preset=mps>Local MPS research</button>"
+        f"<button type=button class='btn ghost' data-preset=discovery>Architecture discovery</button>"
         f"<button type=button class='btn ghost' data-preset=official>Official compliant run</button>"
         f"<button type=button class='btn ghost' data-preset=custom>Custom</button></div>"
         f"<p class=sub id=presetnote>Presets fill the fields below. Nothing is submitted "

@@ -1,0 +1,532 @@
+<title>Signed Research Loop</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans+Condensed:wght@500;600;700&family=IBM+Plex+Serif:ital,wght@0,400;0,500;1,400&family=IBM+Plex+Mono:wght@400;500&display=swap">
+
+<style>
+  :root {
+    --paper:   #f2f3f5;
+    --surface: #ffffff;
+    --sunk:    #e9ebef;
+    --ink:     #15181d;
+    --muted:   #5b6470;
+    --rule:    #d6dae0;
+    --measured:#2b4bdb;
+    --failed:  #a8442a;
+    --measured-wash: #e8ecfd;
+    --failed-wash:   #f8ebe6;
+
+    --sans: "IBM Plex Sans Condensed", "Helvetica Neue", Arial, sans-serif;
+    --serif: "IBM Plex Serif", Georgia, "Times New Roman", serif;
+    --mono: "IBM Plex Mono", ui-monospace, "SF Mono", Menlo, monospace;
+
+    --measure: 66ch;
+    --step--1: 0.82rem;
+    --step-0:  1.0625rem;
+    --step-1:  1.28rem;
+    --step-2:  1.65rem;
+    --step-3:  2.3rem;
+    --step-4:  3.1rem;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --paper:   #0f1216;
+      --surface: #161b21;
+      --sunk:    #1b2129;
+      --ink:     #e6e9ed;
+      --muted:   #98a2ae;
+      --rule:    #262d36;
+      --measured:#7d96ff;
+      --failed:  #e59078;
+      --measured-wash: #18213a;
+      --failed-wash:   #2c1d18;
+    }
+  }
+  :root[data-theme="dark"] {
+    --paper:   #0f1216;
+    --surface: #161b21;
+    --sunk:    #1b2129;
+    --ink:     #e6e9ed;
+    --muted:   #98a2ae;
+    --rule:    #262d36;
+    --measured:#7d96ff;
+    --failed:  #e59078;
+    --measured-wash: #18213a;
+    --failed-wash:   #2c1d18;
+  }
+
+  body {
+    background: var(--paper);
+    color: var(--ink);
+    font-family: var(--serif);
+    font-size: var(--step-0);
+    line-height: 1.62;
+    margin: 0;
+    -webkit-font-smoothing: antialiased;
+  }
+  .wrap { max-width: 1080px; margin: 0 auto; padding: 0 clamp(1.15rem, 4vw, 3rem); }
+  .col { max-width: var(--measure); }
+
+  /* ---- masthead ---- */
+  header.mast { border-bottom: 2px solid var(--ink); padding: clamp(2.5rem,7vw,5rem) 0 1.5rem; }
+  .eyebrow {
+    font-family: var(--sans); font-size: var(--step--1); font-weight: 600;
+    letter-spacing: 0.13em; text-transform: uppercase; color: var(--measured); margin: 0 0 1.1rem;
+  }
+  h1 {
+    font-family: var(--sans); font-weight: 700; font-size: var(--step-4);
+    line-height: 1.02; letter-spacing: -0.018em; margin: 0 0 1.1rem; text-wrap: balance;
+    max-width: 22ch;
+  }
+  .standfirst { font-size: var(--step-1); line-height: 1.45; margin: 0; max-width: 54ch; color: var(--ink); }
+  .standfirst em { font-style: italic; }
+  dl.spec {
+    display: grid; grid-template-columns: auto 1fr; gap: 0.3rem 1.4rem;
+    margin: 2rem 0 0; font-family: var(--mono); font-size: var(--step--1);
+  }
+  dl.spec dt { color: var(--muted); }
+  dl.spec dd { margin: 0; }
+
+  /* ---- sections ---- */
+  section { padding: clamp(2.5rem, 6vw, 4rem) 0 0; }
+  h2 {
+    font-family: var(--sans); font-weight: 700; font-size: var(--step-2);
+    letter-spacing: -0.01em; line-height: 1.12; margin: 0 0 0.35rem; text-wrap: balance;
+  }
+  h2 + .kicker {
+    font-family: var(--sans); font-size: var(--step--1); font-weight: 500;
+    letter-spacing: 0.09em; text-transform: uppercase; color: var(--muted);
+    margin: 0 0 1.6rem; padding-bottom: 0.9rem; border-bottom: 1px solid var(--rule);
+  }
+  h3 {
+    font-family: var(--sans); font-weight: 600; font-size: var(--step-1);
+    margin: 2.2rem 0 0.5rem; line-height: 1.2;
+  }
+  p { margin: 0 0 1.1rem; }
+  strong { font-weight: 500; background: var(--measured-wash); padding: 0 0.15em; }
+  .m { font-family: var(--mono); font-size: 0.9em; }
+  a { color: var(--measured); }
+
+  /* ---- the ordered pipeline: numbering encodes a real sequence ---- */
+  ol.pipeline { list-style: none; counter-reset: step; margin: 0; padding: 0; }
+  ol.pipeline li {
+    counter-increment: step; position: relative; padding: 0 0 1.15rem 3.2rem; margin: 0;
+  }
+  ol.pipeline li::before {
+    content: counter(step); position: absolute; left: 0; top: 0.1em;
+    font-family: var(--mono); font-size: var(--step--1); font-weight: 500;
+    color: var(--measured); border: 1px solid var(--rule); background: var(--surface);
+    width: 1.9rem; height: 1.9rem; display: grid; place-items: center;
+  }
+  ol.pipeline li:last-child { padding-bottom: 0; }
+
+  /* ---- unordered lists stay unnumbered ---- */
+  ul.plain { list-style: none; margin: 0 0 1.1rem; padding: 0; }
+  ul.plain li { position: relative; padding-left: 1.5rem; margin-bottom: 0.7rem; }
+  ul.plain li::before {
+    content: ""; position: absolute; left: 0; top: 0.62em;
+    width: 0.6rem; height: 1px; background: var(--muted);
+  }
+
+  /* ---- measured-number panel ---- */
+  .panel {
+    background: var(--surface); border: 1px solid var(--rule); border-top: 2px solid var(--measured);
+    padding: 1.5rem 1.6rem; margin: 0 0 1.4rem;
+    display: grid; gap: 1.3rem 2.2rem; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
+  }
+  .panel .cell { display: flex; flex-direction: column; gap: 0.25rem; }
+  .panel .lab {
+    font-family: var(--sans); font-size: var(--step--1); font-weight: 500;
+    letter-spacing: 0.07em; text-transform: uppercase; color: var(--muted);
+  }
+  .panel .val {
+    font-family: var(--mono); font-size: var(--step-2); font-weight: 500;
+    font-variant-numeric: tabular-nums; line-height: 1.1;
+  }
+  .panel .val.neg { color: var(--failed); }
+  .panel .val.pos { color: var(--measured); }
+  .panel .sub { font-size: var(--step--1); color: var(--muted); }
+
+  /* ---- tables: full-bleed strip, own scroll ---- */
+  .strip { margin: 0 0 1.4rem; }
+  .scroll { overflow-x: auto; border: 1px solid var(--rule); background: var(--surface); }
+  table { border-collapse: collapse; width: 100%; font-size: var(--step--1); }
+  caption {
+    text-align: left; font-family: var(--sans); font-size: var(--step--1); font-weight: 500;
+    letter-spacing: 0.07em; text-transform: uppercase; color: var(--muted); padding: 0 0 0.55rem;
+  }
+  th, td { text-align: left; padding: 0.6rem 0.9rem; border-bottom: 1px solid var(--rule); white-space: nowrap; }
+  thead th {
+    font-family: var(--sans); font-weight: 600; letter-spacing: 0.05em;
+    text-transform: uppercase; font-size: 0.78rem; color: var(--muted); background: var(--sunk);
+  }
+  tbody tr:last-child td { border-bottom: none; }
+  td.n { font-family: var(--mono); font-variant-numeric: tabular-nums; }
+  td.n.neg { color: var(--failed); }
+  td.n.pos { color: var(--measured); }
+  td.wrap-ok { white-space: normal; min-width: 18ch; }
+
+  /* ---- failure callout ---- */
+  .fail {
+    background: var(--failed-wash); border-left: 3px solid var(--failed);
+    padding: 1.15rem 1.35rem; margin: 0 0 1.3rem;
+  }
+  .fail .hd {
+    font-family: var(--sans); font-weight: 600; font-size: var(--step--1);
+    letter-spacing: 0.09em; text-transform: uppercase; color: var(--failed); margin: 0 0 0.5rem;
+  }
+  .fail p:last-child { margin-bottom: 0; }
+  .fail strong { background: transparent; color: var(--failed); font-weight: 500; }
+
+  /* ---- figures ---- */
+  figure { margin: 1.8rem 0 1.6rem; }
+  figure svg { display: block; width: 100%; height: auto; max-width: 100%; }
+  figcaption {
+    font-size: var(--step--1); color: var(--muted); margin-top: 0.7rem;
+    padding-left: 0.9rem; border-left: 1px solid var(--rule); max-width: 60ch;
+  }
+
+  pre {
+    background: var(--surface); border: 1px solid var(--rule); border-left: 2px solid var(--measured);
+    padding: 1rem 1.15rem; overflow-x: auto; font-family: var(--mono);
+    font-size: var(--step--1); line-height: 1.65; margin: 0 0 1.2rem;
+  }
+  code { font-family: var(--mono); font-size: 0.9em; }
+
+  footer {
+    margin-top: clamp(3rem, 8vw, 5rem); border-top: 1px solid var(--rule);
+    padding: 1.5rem 0 3rem; font-size: var(--step--1); color: var(--muted);
+  }
+  @media (prefers-reduced-motion: reduce) { * { animation: none !important; transition: none !important; } }
+</style>
+
+<div class="wrap">
+
+<header class="mast">
+  <p class="eyebrow">TikTok TechJam 2026 &middot; Track 2 &middot; Autonomous ML Research Agent</p>
+  <h1>The agent writes the code, and the ledger says what failed</h1>
+  <p class="standfirst">A research loop whose actuator is <em>an edit to a source tree</em>, not a
+  choice from a menu of hyperparameters &mdash; with a signed, pre-registered ledger that makes
+  every number here checkable, including the ones that make the agent look bad.</p>
+  <dl class="spec">
+    <dt>dataset</dt><dd>KuaiRand-Pure &mdash; within-user ranking of logged impressions</dd>
+    <dt>label</dt><dd>long_view</dd>
+    <dt>metric</dt><dd>primary = mean(GAUC, nDCG@5)</dd>
+    <dt>result</dt><dd>+0.001888 validation, confirmed over 20 paired seeds (t = 11.50, 20/20)</dd>
+    <dt>interventions</dt><dd>0</dd>
+  </dl>
+</header>
+
+<section>
+  <div class="col">
+    <h2>What it does</h2>
+    <p class="kicker">One iteration, five steps</p>
+    <ol class="pipeline">
+      <li><strong>Proposes six competing hypotheses</strong>, one per research lane &mdash;
+      architecture, objective, sampling/training, features, optimisation/regularisation,
+      ensembling.</li>
+      <li>A <strong>judge ranks them and funds exactly one</strong>, and must give a verdict on
+      every candidate by id, not just the winner.</li>
+      <li>The agent <strong>writes the code</strong>, editing any of <span class="m">config.json</span>,
+      <span class="m">features.py</span>, <span class="m">model.py</span>,
+      <span class="m">train.py</span> in a mutable workspace.</li>
+      <li>The hypothesis, the resulting tree hash and the harness-computed diff are
+      <strong>pre-registered in a signed ledger before the candidate is allowed to run</strong>.</li>
+      <li>It <strong>fits, scores, and reflects</strong> &mdash; updating a structured belief keyed
+      by <em>mechanism</em>, recording whether that mechanism was supported or contradicted and
+      under what condition it may be retried.</li>
+    </ol>
+    <p style="margin-top:1.3rem">The champion is immutable and advances only on a signed
+    validation improvement, so a bad run can spend budget but cannot damage the submission.</p>
+  </div>
+
+  <figure>
+    <svg viewBox="0 0 860 210" role="img" aria-label="One iteration flows from six lane candidates, through a judge that funds one, to the agent writing source. A signed pre-registration gate sits before fit and score: no candidate may execute until its hypothesis and diff are recorded. Reflection updates a mechanism-keyed belief.">
+      <defs>
+        <marker id="ar" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+          <path d="M 0 0 L 10 5 L 0 10 z" fill="currentColor"/>
+        </marker>
+      </defs>
+      <g font-family="IBM Plex Sans Condensed, Arial, sans-serif" font-size="12" fill="currentColor">
+        <rect x="8"   y="40" width="118" height="56" fill="none" stroke="currentColor" stroke-width="1"/>
+        <text x="67"  y="63" text-anchor="middle">six candidates</text>
+        <text x="67"  y="79" text-anchor="middle" opacity="0.65">one per lane</text>
+
+        <rect x="152" y="40" width="118" height="56" fill="none" stroke="currentColor" stroke-width="1"/>
+        <text x="211" y="63" text-anchor="middle">judge ranks,</text>
+        <text x="211" y="79" text-anchor="middle">funds one</text>
+
+        <rect x="296" y="40" width="118" height="56" fill="none" stroke="currentColor" stroke-width="1"/>
+        <text x="355" y="63" text-anchor="middle">agent writes</text>
+        <text x="355" y="79" text-anchor="middle">source</text>
+
+        <rect x="440" y="40" width="130" height="56" fill="none" style="stroke:var(--measured)" stroke-width="2"/>
+        <text x="505" y="63" text-anchor="middle" style="fill:var(--measured)" font-weight="600">pre-register</text>
+        <text x="505" y="79" text-anchor="middle" style="fill:var(--measured)">signed &amp; chained</text>
+
+        <rect x="596" y="40" width="110" height="56" fill="none" stroke="currentColor" stroke-width="1"/>
+        <text x="651" y="70" text-anchor="middle">fit + score</text>
+
+        <rect x="732" y="40" width="118" height="56" fill="none" stroke="currentColor" stroke-width="1"/>
+        <text x="791" y="63" text-anchor="middle">reflect</text>
+        <text x="791" y="79" text-anchor="middle" opacity="0.65">belief by mechanism</text>
+
+        <line x1="126" y1="68" x2="150" y2="68" stroke="currentColor" marker-end="url(#ar)"/>
+        <line x1="270" y1="68" x2="294" y2="68" stroke="currentColor" marker-end="url(#ar)"/>
+        <line x1="414" y1="68" x2="438" y2="68" stroke="currentColor" marker-end="url(#ar)"/>
+        <line x1="570" y1="68" x2="594" y2="68" stroke="currentColor" marker-end="url(#ar)"/>
+        <line x1="706" y1="68" x2="730" y2="68" stroke="currentColor" marker-end="url(#ar)"/>
+
+        <line x1="433" y1="14" x2="433" y2="150" style="stroke:var(--measured)" stroke-width="1" stroke-dasharray="3 4"/>
+        <text x="440" y="140" style="fill:var(--measured)" font-size="11">execution is not permitted left-to-right past this line until the record is written</text>
+
+        <path d="M 791 96 L 791 176 L 67 176 L 67 100" fill="none" stroke="currentColor" stroke-width="1" stroke-dasharray="2 4" marker-end="url(#ar)" opacity="0.55"/>
+        <text x="429" y="192" text-anchor="middle" font-size="11" opacity="0.7">beliefs carried into the next tournament</text>
+      </g>
+    </svg>
+    <figcaption>The gate is the integrity claim. A candidate that fails to register aborts rather
+    than running, which is what prevents a result from being written after the fact.</figcaption>
+  </figure>
+</section>
+
+<section>
+  <div class="col">
+    <h2>Results</h2>
+    <p class="kicker">The submitted champion</p>
+  </div>
+  <div class="panel">
+    <div class="cell">
+      <span class="lab">signed validation primary</span>
+      <span class="val">0.604074</span>
+      <span class="sub">GAUC 0.670569 &middot; nDCG@5 0.53758</span>
+    </div>
+    <div class="cell">
+      <span class="lab">vs published baseline</span>
+      <span class="val pos">+0.002474</span>
+      <span class="sub">baseline 0.6016, at the run's seed</span>
+    </div>
+    <div class="cell">
+      <span class="lab">confirmed, 20 paired seeds</span>
+      <span class="val pos">+0.001888</span>
+      <span class="sub">t = 11.50 &middot; wins 20/20</span>
+    </div>
+    <div class="cell">
+      <span class="lab">manual interventions</span>
+      <span class="val">0</span>
+      <span class="sub">train/dev gap 0.044325</span>
+    </div>
+  </div>
+  <div class="col">
+    <p>For scale: the seed standard deviation on this task is <span class="m">0.0008</span>, and a
+    per-user oracle ceiling is <span class="m">0.8645</span>. Real gains here are small, so a
+    headline number without a paired multi-seed test behind it is not a result &mdash; which is why
+    a single-seed promotion is treated as a search decision and never quoted as a finding.</p>
+
+    <h3>An independent run reached the same place by a different route</h3>
+    <p>A later compliant run converged in three iterations on a structurally different
+    configuration &mdash; no <span class="m">user_hist_len</span>,
+    <span class="m">neg_per_pos: 1</span>, <span class="m">l2: 1e-05</span>, plus a cosine decay
+    schedule it wrote into <span class="m">train.py</span> itself.</p>
+  </div>
+  <div class="strip">
+    <div class="scroll">
+      <table>
+        <caption>Compliant run, official stopping rule (&epsilon;=0.002, N=3)</caption>
+        <thead><tr><th>it</th><th>lane</th><th>outcome</th><th>delta</th><th>files changed</th></tr></thead>
+        <tbody>
+          <tr><td class="n">1</td><td>objective_loss</td><td>promoted</td><td class="n pos">+0.001876</td><td class="wrap-ok m">config.json</td></tr>
+          <tr><td class="n">2</td><td>sampling_training</td><td>rejected</td><td class="n neg">&minus;0.000086</td><td class="wrap-ok m">config.json</td></tr>
+          <tr><td class="n">3</td><td>optimization_regularization</td><td>promoted</td><td class="n pos">+0.000029</td><td class="wrap-ok m">config.json, train.py</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+  <div class="col">
+    <p>It confirmed at <strong>+0.001845, t = 11.12, 20/20</strong>. Compared directly against the
+    submitted champion over the same twenty seeds: <span class="m">&minus;0.0000433</span>,
+    <span class="m">t = &minus;0.31</span>, 13/20 to 7/20 &mdash; statistically indistinguishable.
+    The frozen champion stands and the rerun is reported as corroboration, not as an improvement.</p>
+    <p>That convergence is the most useful finding here. <strong>Pairwise ranking is the dominant
+    observed lever</strong>: two materially different surrounding configurations built on the same
+    pairwise implementation land within <span class="m">0.00005</span> of each other. Note what
+    this does <em>not</em> say &mdash; the surrounding choices are <em>small or unresolved</em>, not
+    disproved. No component ablation has been run.</p>
+  </div>
+</section>
+
+<section>
+  <div class="col">
+    <h2>What failed</h2>
+    <p class="kicker">The section worth reading first</p>
+    <p>The failures are better evidence that the loop is real than the +0.0019 is.</p>
+
+    <div class="fail">
+      <p class="hd">The agent's own BPR implementation was broken &mdash; and the harness caught it</p>
+      <p>On the pointwise-only <span class="m">minimal</span> profile the agent wrote
+      <span class="m">step_bpr</span> plus per-user negative sampling across
+      <span class="m">model.py</span> and <span class="m">train.py</span>: a genuine multi-file
+      implementation. It scored <strong>&minus;0.206874</strong>, far below the 0.5 random floor,
+      with train (0.3156) <em>worse</em> than validation (0.3948).</p>
+      <p>The defect: the optimiser expects <span class="m">dLoss/dz</span> and descends, but the
+      BPR step passed <span class="m">+&sigma;(&minus;diff)</span> to positives and
+      <span class="m">&minus;&sigma;(&minus;diff)</span> to negatives &mdash; both signs inverted.
+      It performed <strong>gradient ascent</strong>, training the model to rank negatives above
+      positives.</p>
+    </div>
+  </div>
+
+  <figure>
+    <svg viewBox="0 0 520 250" role="img" aria-label="Training loss by epoch. The agent's BPR implementation rises monotonically from 0.738 at epoch one to 11.165 at epoch eight, while the pointwise baseline falls from 0.639 to 0.484 and stays flat near zero on the same scale.">
+      <g font-family="IBM Plex Mono, monospace" font-size="10" fill="currentColor">
+        <line x1="56" y1="20" x2="56" y2="200" stroke="currentColor" stroke-width="1" opacity="0.5"/>
+        <line x1="56" y1="200" x2="505" y2="200" stroke="currentColor" stroke-width="1" opacity="0.5"/>
+        <g opacity="0.45">
+          <line x1="56" y1="140" x2="505" y2="140" stroke="currentColor" stroke-dasharray="2 4"/>
+          <line x1="56" y1="80"  x2="505" y2="80"  stroke="currentColor" stroke-dasharray="2 4"/>
+          <line x1="56" y1="20"  x2="505" y2="20"  stroke="currentColor" stroke-dasharray="2 4"/>
+        </g>
+        <text x="48" y="203" text-anchor="end" opacity="0.7">0</text>
+        <text x="48" y="143" text-anchor="end" opacity="0.7">4</text>
+        <text x="48" y="83"  text-anchor="end" opacity="0.7">8</text>
+        <text x="48" y="23"  text-anchor="end" opacity="0.7">12</text>
+
+        <polyline points="60,188.9 122.9,182.2 185.7,158.8 248.6,118.7 311.4,80.4 374.3,56.4 437.1,41.8 500,32.5"
+                  fill="none" style="stroke:var(--failed)" stroke-width="2.5"/>
+        <polyline points="60,190.4 122.9,191.8 185.7,192.3 248.6,192.5 311.4,192.6 374.3,192.6 437.1,192.7 500,192.8"
+                  fill="none" style="stroke:var(--measured)" stroke-width="2.5"/>
+
+        <text x="500" y="26" text-anchor="end" style="fill:var(--failed)" font-family="IBM Plex Sans Condensed, Arial, sans-serif" font-size="11.5" font-weight="600">agent-written BPR &mdash; ascent</text>
+        <text x="500" y="185" text-anchor="end" style="fill:var(--measured)" font-family="IBM Plex Sans Condensed, Arial, sans-serif" font-size="11.5" font-weight="600">pointwise baseline &mdash; descent</text>
+
+        <text x="60"  y="216" text-anchor="middle" opacity="0.7">1</text>
+        <text x="280" y="216" text-anchor="middle" opacity="0.7">epoch</text>
+        <text x="500" y="216" text-anchor="middle" opacity="0.7">8</text>
+        <text x="280" y="238" text-anchor="middle" font-family="IBM Plex Sans Condensed, Arial, sans-serif" font-size="11" opacity="0.75">recorded per-epoch training loss, from the run's own telemetry</text>
+      </g>
+    </svg>
+    <figcaption>The loss rose monotonically 0.738 &rarr; 11.165 across 30 epochs. Nothing aborted a
+    run that had been diverging since epoch two &mdash; the single clearest improvement this project
+    has left to make.</figcaption>
+  </figure>
+
+  <div class="col">
+    <div class="fail">
+      <p class="hd">One iteration was silently inert</p>
+      <p>The agent implemented feature-level dropout properly &mdash; constructor parameter,
+      inverted-scaling binomial mask, <span class="m">training=True</span> correctly threaded into
+      the training path &mdash; but never passed the config value into the constructor, so the
+      default <span class="m">0.0</span> stood and <span class="m">"dropout": 0.1</span> was dead
+      code. The result was <strong>bit-identical to its parent to 15 significant figures</strong>,
+      and deduplication could not see it because the tree hash genuinely differed. 38,113 tokens
+      re-derived the champion.</p>
+    </div>
+
+    <div class="fail">
+      <p class="hd">Architecture: considered nine times, promoted zero times</p>
+      <p>Lane coverage is <em>required</em> by the tournament validator, so a
+      <span class="m">model_architecture</span> candidate appearing is <strong>the policy working,
+      not the agent showing initiative</strong>. The report states this in its own words rather
+      than letting a &ldquo;considered&rdquo; column imply curiosity.</p>
+    </div>
+
+    <p>Two more, recorded rather than smoothed over. The reflector diagnosed the BPR failure as
+    &ldquo;improper gradient alignment or sampling mismatch&rdquo; at confidence 0.95 &mdash;
+    directionally near, but it never identified the sign inversion. And the agent
+    <strong>over-predicted its own gain on essentially every scored iteration</strong>; predicted
+    and actual are printed side by side rather than hidden.</p>
+
+    <h3>One distinction I want to be exact about</h3>
+    <p>The compliant run above ran on the <span class="m">inherited</span> profile, where a working
+    pairwise implementation already existed and the ledger records
+    <span class="m">pairwise_code_present: true</span>. At iteration 1 the agent observed that
+    implementation and changed <strong>only <span class="m">config.json</span>, a 202-byte
+    diff</strong>. So that run is an <em>independent tournament-driven search route</em> to
+    essentially the same performance &mdash; it is <em>not</em> an independent authorship of the
+    objective. The only genuine from-scratch BPR implementation is the one that failed.</p>
+  </div>
+</section>
+
+<section>
+  <div class="col">
+    <h2>What I learned</h2>
+    <p class="kicker">Mostly about measurement</p>
+    <ul class="plain">
+      <li><strong>A test that cannot fail is worse than no test.</strong> Of 38 defects found in
+      one review sweep, 12 were in tests and <em>5 could not fail</em> &mdash; including the two
+      guarding the invariants I would have defended most confidently. What found them: after fixing
+      a defect, sweep for its <em>class</em> across every module instead of re-reading the file it
+      appeared in.</li>
+      <li><strong>A measurement that confirms what you expect should be verified before it is acted
+      on.</strong> Nine times the measurement was wrong rather than the code &mdash; a filter that
+      could not display the outcome I was not expecting; a <span class="m">timeout</span> binary
+      that does not exist on macOS, which made 28 passing suites report as failures; a single
+      successful API probe read as &ldquo;the quota reset&rdquo;.</li>
+      <li><strong>Never let a test-set number justify a protocol decision.</strong> I once used a
+      test-derived delta to argue about the convergence threshold. The correct figures were
+      validation-only, and smaller. The episode is recorded in the repository rather than quietly
+      deleted.</li>
+      <li><strong>A wall-clock field that reads 0.0 will be believed.</strong> Per-iteration records
+      were written <em>inside</em> the timing context, where the duration had not yet been assigned,
+      so every iteration logged <span class="m">wall_seconds: 0.0</span> against stage sums of
+      11&ndash;18 seconds. The fix ships with a mutation-tested invariant &mdash; every record's
+      wall time must be at least its own stage sum &mdash; confirmed to fail when the fix is
+      reverted.</li>
+    </ul>
+  </div>
+</section>
+
+<section>
+  <div class="col">
+    <h2>Limitations</h2>
+    <p class="kicker">Stated plainly</p>
+    <ul class="plain">
+      <li>Only the cheapest model tier (<span class="m">gemini-3.5-flash-lite</span>) has ever
+      driven this loop. Whether a stronger tier reaches for architecture is untested.</li>
+      <li>No <span class="m">model_architecture</span> candidate has been selected and successfully
+      promoted.</li>
+      <li>The secondary effects around the pairwise objective are small or unresolved, not
+      disproved: the negative-sampling change lost on a single search iteration rather than a
+      20-seed ablation, <span class="m">user_hist_len</span> helped in the original lineage, and the
+      L2-plus-cosine step was never confirmed against its immediate parent across seeds.</li>
+      <li>The train/dev gap is a diagnostic: the harness verifies the size of the returned
+      train-subset vector but cannot verify which rows produced it.</li>
+      <li>Docker isolation is implemented but unexercised; the measured boundary is the macOS
+      seatbelt sandbox.</li>
+    </ul>
+
+    <h2 style="margin-top:2.8rem">What's next</h2>
+    <p class="kicker">In priority order</p>
+    <ol class="pipeline">
+      <li>A <strong>divergence guard</strong>. A monotonically rising training loss is an
+      unambiguous abort signal from epoch two, and would have handed the coder a far sharper repair
+      signal than &ldquo;primary was 0.39&rdquo;.</li>
+      <li>An <strong>inert-change detector</strong>. A delta of exactly zero <em>with</em> an
+      identical train metric means semantically inert &mdash; cheap to flag, and it recovers an
+      evaluation slot that hash-based deduplication structurally cannot see.</li>
+      <li><strong>Component ablations</strong> over 20 seeds, to turn the unresolved secondary
+      effects into measurements.</li>
+      <li>A <strong>stronger tier on the architecture lane</strong>, the one open question the
+      budget never let me answer.</li>
+    </ol>
+
+    <h2 style="margin-top:2.8rem">How to verify</h2>
+    <p class="kicker">Nothing here is asserted on trust</p>
+    <pre>python3 -m core.scorer verify --ledger runs/ledgers/research_submission.jsonl
+python3 -m agent.research_report --ledger runs/ledgers/research_submission.jsonl
+for f in tests/test_*.py; do python3 "$f"; done</pre>
+    <p>The signed chain re-verifies; artifact hashes and pre-registration ordering are recomputed by
+    the report itself. <span class="m">submission_compliant/MANIFEST.json</span> binds the submitted
+    predictions to the champion tree hash, the signing sequence number, and the score vector's own
+    SHA-256. Diagnostic and compliant runs live in separate ledgers, because a run with the stopping
+    rule switched off is not evidence about the official protocol.</p>
+  </div>
+</section>
+
+<footer>
+  <div class="col">
+    KuaiRand-Pure is used under CC BY-SA 4.0 and is not redistributed in the repository &mdash; only
+    code, splits, manifests and hashes. 28 test suites, 0 manual interventions, 15 local commits.
+  </div>
+</footer>
+
+</div>

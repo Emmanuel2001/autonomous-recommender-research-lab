@@ -1,0 +1,16 @@
+{
+  "bytes": 13964,
+  "files": [
+    "config.json",
+    "features.py",
+    "model.py",
+    "train.py"
+  ],
+  "meta": {
+    "attempt": 0,
+    "contract_sha256": "67f1f4a2b55645ffcd002edb1e94643ea05e97861542b9adaeb78dafd565a536",
+    "iteration": 3
+  },
+  "tree": "21ac8371c1e3f8ed4442327aacb8987e78cc9c7cdf3a1eb23ca0a3c1fbd00b23",
+  "tree_version": "track2-tree-v1"
+}

@@ -1,0 +1,22 @@
+{
+  "loss": "pairwise",
+  "fields": [
+    "user_id",
+    "video_id",
+    "author_id",
+    "tab",
+    "user_tab",
+    "dur_bucket",
+    "user_tab_dur",
+    "hourmin_bucket"
+  ],
+  "k": 16,
+  "lr": 0.001,
+  "l2": 2e-06,
+  "epochs": 40,
+  "batch": 8192,
+  "patience": 4,
+  "seed": 0,
+  "neg_per_pos": 1,
+  "train_curve_every": 1
+}

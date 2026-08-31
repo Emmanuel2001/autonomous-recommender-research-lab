@@ -1,0 +1,15 @@
+{
+  "bytes": 14144,
+  "files": [
+    "config.json",
+    "features.py",
+    "model.py",
+    "train.py"
+  ],
+  "meta": {
+    "contract_sha256": "67f1f4a2b55645ffcd002edb1e94643ea05e97861542b9adaeb78dafd565a536",
+    "task": "kuairand_pure"
+  },
+  "tree": "369a0883b0d4551def03a5fa3d37aed4c89e32a26eeb96f1433e409654ece2c3",
+  "tree_version": "track2-tree-v1"
+}

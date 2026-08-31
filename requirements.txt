@@ -1,0 +1,25 @@
+# The harness needs exactly two third-party packages. That is deliberate: the strategy the
+# agent writes is numpy-only, so the graded result needs no accelerator and no heavy stack.
+#
+#   python3 -m pip install -r requirements.txt
+#
+# Verified against Python 3.14.3 on macOS (Apple silicon). Versions are the ones the
+# recorded runs used; the code does not depend on anything version-specific in them.
+numpy==2.4.3
+pandas==3.0.1
+
+# ---------------------------------------------------------------------------------------
+# OPTIONAL, and NOT needed to reproduce the submission or run the test suite.
+#
+#   anthropic        only for `--backend anthropic`. The default backend is `gemini`, which
+#                    talks HTTP directly and needs no SDK. Every recorded run used gemini.
+#   scipy, torch     only imported by strategy/mle_strategy.py, which belongs to the
+#                    SUPERSEDED task. Nothing on the current path imports them.
+#
+# Packages the AGENT may request for a candidate are a separate, enforced allowlist in
+# agent/deps.py -- they are installed with `pip install --target` into a scratch directory,
+# never into this environment. See deliverables/ISOLATION.md.
+#
+# anthropic>=0.40
+# scipy==1.17.1
+# torch==2.11.0

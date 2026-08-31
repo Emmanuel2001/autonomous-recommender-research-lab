@@ -213,4 +213,7 @@ So the repository still separates a **capability** from the **behaviour** observ
 * The train/dev gap is a **diagnostic**: the harness verifies the *size* of the returned
   train-subset vector but cannot verify which rows produced it.
 * Docker isolation is implemented but unexercised; the measured boundary is macOS seatbelt.
-* This repository has **no commits** yet, by instruction.
+* The history is **local only** — 13 commits, no remote and nothing pushed, by instruction.
+  The dataset, credentials, fitted models and prediction vectors are excluded; the signed
+  ledgers, the artifact store and the submitted prediction file are committed, because a
+  reader who cannot check a hash against an artifact cannot check anything.

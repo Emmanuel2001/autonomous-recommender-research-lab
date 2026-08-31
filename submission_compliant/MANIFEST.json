@@ -1,0 +1,149 @@
+{
+ "task": "KuaiRand-Pure, within-user ranking of logged impressions",
+ "label": "long_view",
+ "metric": "primary = mean(GAUC, nDCG@5)",
+ "produced_by": "agent/research_driver.py (code-first autonomous loop)",
+ "champion": {
+  "tree": "fe985741a8368e082be4c71e0d9e3be06ca333f2aac1b26216203cbf2283c3b5",
+  "artifact": "runs/artifacts/fe985741a8368e082be4c71e0d9e3be06ca333f2aac1b26216203cbf2283c3b5",
+  "files": [
+   "config.json",
+   "features.py",
+   "model.py",
+   "train.py"
+  ],
+  "tree_bytes": 13484,
+  "iteration": 3,
+  "hypothesis": "Add user history length feature ('user_hist_len', binning or log of total interactions per user) to provide a user activity density signal in the Factorization Machine.",
+  "contract_sha256": "67f1f4a2b55645ffcd002edb1e94643ea05e97861542b9adaeb78dafd565a536"
+ },
+ "signed_validation": {
+  "seq": 53,
+  "kind": "score",
+  "GAUC": 0.670569,
+  "nDCG@5": 0.53758,
+  "primary": 0.604074,
+  "corroborating_identical_fits": [],
+  "delta_vs_official_baseline": 0.002474,
+  "scores_sha256": "ffe4fed193db4b33cb8b2b88817c518df5c11f90c1d12b12393af641a398cfbd",
+  "split_content_sha256": "406299f1122bcabc0626d65813fb99a680c80b47c23f7f485e371172953dd5cc"
+ },
+ "harness_measured": {
+  "train_primary": 0.6483996507129735,
+  "dev_primary": 0.6040743828711941,
+  "train_dev_gap": 0.044325,
+  "note": "computed by the harness with the official metric from the candidate's returned score vectors; not self-reported"
+ },
+ "official_baseline": {
+  "valid_primary": 0.6016,
+  "test_primary": 0.5946
+ },
+ "binding": {
+  "held_out_scores_from": "runs/candidates/trial_4/iter003_a0_fe985741a836",
+  "dev_scores_sha256": "ffe4fed193db4b33cb8b2b88817c518df5c11f90c1d12b12393af641a398cfbd",
+  "how": "the dev scores in this directory hash to the value the scorer signed, so the held-out scores beside them are from the same fit. The submission is NOT a refit."
+ },
+ "kit_check_passed": true,
+ "lineage": [
+  {
+   "iteration": 0,
+   "tree": "e1d994dedd110658b8c1c130486fb980b98df84e6fabafcad664b94d38ed693c",
+   "parent": null,
+   "outcome": "promoted",
+   "hypothesis": "the official baseline as an editable candidate tree",
+   "files_changed": [],
+   "diff_hash": "",
+   "expected_magnitude": null,
+   "dev_primary": 0.601696214006316,
+   "train_primary": 0.6868607595225553,
+   "gap": 0.085165,
+   "repairs": 0
+  },
+  {
+   "iteration": 1,
+   "tree": "b6133e76f5e91790fba6bed2033131e6b26c74f60e431520d85247ac433d0c0c",
+   "parent": "e1d994dedd110658b8c1c130486fb980b98df84e6fabafcad664b94d38ed693c",
+   "outcome": "rejected",
+   "hypothesis": "Add 'hourmin_bucket' as a categorical feature alongside the existing five fields to capture diurnal user preference cycles.",
+   "files_changed": [
+    "config.json",
+    "features.py"
+   ],
+   "diff_hash": "dd76f3f05cb22553597e026168eac22f6acceb7e548d38f6b30d6682449d36ca",
+   "expected_magnitude": 0.003,
+   "dev_primary": 0.6012564904044864,
+   "train_primary": 0.6830977882263414,
+   "gap": 0.081841,
+   "repairs": 0
+  },
+  {
+   "iteration": 2,
+   "tree": "0f4cb30df9ed93b972a0a58a67b038d92b8330c9db4702c7dc61b97b7c4b4005",
+   "parent": "e1d994dedd110658b8c1c130486fb980b98df84e6fabafcad664b94d38ed693c",
+   "outcome": "promoted",
+   "hypothesis": "Add a second-order pairwise BPR loss combined with pointwise loss (or switch to pure pairwise BPR with neg_per_pos=2) to better optimize the ranking objective directly.",
+   "files_changed": [
+    "config.json"
+   ],
+   "diff_hash": "ff062106b8ea17b6d3e60fa19430c2e118f63df5368757b48e90013031dc1df4",
+   "expected_magnitude": 0.003,
+   "dev_primary": 0.6035027062703097,
+   "train_primary": 0.6520458952694955,
+   "gap": 0.048543,
+   "repairs": 0
+  },
+  {
+   "iteration": 3,
+   "tree": "fe985741a8368e082be4c71e0d9e3be06ca333f2aac1b26216203cbf2283c3b5",
+   "parent": "0f4cb30df9ed93b972a0a58a67b038d92b8330c9db4702c7dc61b97b7c4b4005",
+   "outcome": "promoted",
+   "hypothesis": "Add user history length feature ('user_hist_len', binning or log of total interactions per user) to provide a user activity density signal in the Factorization Machine.",
+   "files_changed": [
+    "config.json",
+    "features.py"
+   ],
+   "diff_hash": "7142a506c6961f70fc50f0f9aa4127087965e450ed9c181106b761aa7c65cde4",
+   "expected_magnitude": 0.0015,
+   "dev_primary": 0.6040743828711941,
+   "train_primary": 0.6483996507129735,
+   "gap": 0.044325,
+   "repairs": 0
+  },
+  {
+   "iteration": 4,
+   "tree": "9a4d8b4bcc6d750e69e11f7351fbb1230f6bca0ae4cadef7683fc6c291761e5a",
+   "parent": "fe985741a8368e082be4c71e0d9e3be06ca333f2aac1b26216203cbf2283c3b5",
+   "outcome": "rejected",
+   "hypothesis": "Combine user history length with item popularity feature ('item_popularity' or log frequency of video appearances) in the Factorization Machine features to better capture cold-start versus head item dynamics.",
+   "files_changed": [
+    "config.json",
+    "features.py"
+   ],
+   "diff_hash": "126e8a8eaae8a65c97b38aa6b42245daf3d73df94512bcdf175d7bf3a69fa341",
+   "expected_magnitude": 0.0015,
+   "dev_primary": 0.6007719017217934,
+   "train_primary": 0.6399433483290051,
+   "gap": 0.039171,
+   "repairs": 0
+  },
+  {
+   "iteration": 5,
+   "tree": "00ac6d4144bf64445474e0a794fb19151ffb0ed934689d0946369c4db4ccdeed",
+   "parent": "fe985741a8368e082be4c71e0d9e3be06ca333f2aac1b26216203cbf2283c3b5",
+   "outcome": "rejected",
+   "hypothesis": "Add a cross-feature interaction or bucketed author-item feature (e.g. author_id combined with tab or interaction density) into the Factorization Machine fields to capture finer-grained author-context preferences.",
+   "files_changed": [
+    "config.json",
+    "features.py"
+   ],
+   "diff_hash": "3ea9d1f08b9fe1837941a1889af7cad724ff38a59ed050a5f00df9feaef795b0",
+   "expected_magnitude": 0.0015,
+   "dev_primary": 0.6022304559838754,
+   "train_primary": 0.66367833204238,
+   "gap": 0.061448,
+   "repairs": 0
+  }
+ ],
+ "manual_interventions": [],
+ "submission_file": "submission_test.csv"
+}

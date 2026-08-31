@@ -1,0 +1,279 @@
+[
+ {
+  "backend": "none",
+  "sandbox": {
+   "backend": "none",
+   "data_root": {
+    "path": "/Users/emmanuel/Documents/Personal/Track2-clean/runs/strategy_data",
+    "present": [
+     "log_standard_4_08_to_4_21_pure.csv",
+     "log_standard_4_22_to_5_08_pure.csv",
+     "user_features_pure.csv",
+     "video_features_basic_pure.csv"
+    ],
+    "absent_from_root": [
+     "log_random_4_22_to_5_08_pure.csv",
+     "video_features_statistic_pure.csv"
+    ],
+    "originals_denied_by_kernel": [
+     "log_random_4_22_to_5_08_pure.csv",
+     "log_standard_4_22_to_5_08_pure.csv",
+     "video_features_statistic_pure.csv"
+    ],
+    "log_random_included": false,
+    "redactions": [
+     {
+      "file": "log_standard_4_22_to_5_08_pure.csv",
+      "rows": 295497,
+      "rows_blanked": 170588,
+      "columns_blanked": [
+       "is_click",
+       "is_like",
+       "is_follow",
+       "is_comment",
+       "is_forward",
+       "is_hate",
+       "long_view",
+       "play_time_ms",
+       "profile_stay_time",
+       "comment_stay_time",
+       "is_profile_enter"
+      ],
+      "columns_absent": [],
+      "blank_range": [
+       20220429,
+       20220508
+      ]
+     }
+    ]
+   },
+   "out_dir": "/Users/emmanuel/Documents/Personal/Track2-clean/runs/iso",
+   "profile": "",
+   "read_denied": [
+    "/Users/emmanuel/Documents/Personal/Track2-clean/KuaiRand-Pure/data/log_random_4_22_to_5_08_pure.csv",
+    "/Users/emmanuel/Documents/Personal/Track2-clean/KuaiRand-Pure/data/log_standard_4_22_to_5_08_pure.csv",
+    "/Users/emmanuel/Documents/Personal/Track2-clean/KuaiRand-Pure/data/video_features_statistic_pure.csv",
+    "/Users/emmanuel/Documents/Personal/Track2-clean/.env",
+    "/Users/emmanuel/Documents/Personal/Track2-clean/runs/ledger.jsonl",
+    "/Users/emmanuel/Documents/Personal/Track2/KuaiRand-Pure/data/log_random_4_22_to_5_08_pure.csv",
+    "/Users/emmanuel/Documents/Personal/Track2/KuaiRand-Pure/data/log_standard_4_22_to_5_08_pure.csv",
+    "/Users/emmanuel/Documents/Personal/Track2/KuaiRand-Pure/data/video_features_statistic_pure.csv",
+    "/Users/emmanuel/Documents/Personal/Track2-clean/secrets",
+    "/Users/emmanuel/Documents/Personal/Track2-clean/runs/ledgers"
+   ],
+   "enforced_by": "nothing -- in-process, no boundary"
+  },
+  "attempts": {
+   "read_eval_labels": "SUCCEEDED: read a labelled row (68 bytes)",
+   "read_ledger": "SUCCEEDED: read 27035 bytes of research_official.jsonl",
+   "read_signing_key": "blocked: FileNotFoundError (path not visible)",
+   "write_ledger": "SUCCEEDED: appended a forged entry",
+   "overwrite_scorer": "SUCCEEDED: opened core/scorer.py for writing",
+   "network": "SUCCEEDED: opened an outbound TCP connection",
+   "escape_via_child": "SUCCEEDED: child read 21765075 bytes"
+  },
+  "blocked": [
+   "read_signing_key"
+  ],
+  "succeeded": [
+   "escape_via_child",
+   "network",
+   "overwrite_scorer",
+   "read_eval_labels",
+   "read_ledger",
+   "write_ledger"
+  ],
+  "expected_blocked": [],
+  "unexpectedly_allowed": [],
+  "signing_key_in_env": false,
+  "llm_key_in_env": false,
+  "ok": true
+ },
+ {
+  "backend": "subprocess",
+  "sandbox": {
+   "backend": "subprocess",
+   "data_root": {
+    "path": "/Users/emmanuel/Documents/Personal/Track2-clean/runs/strategy_data",
+    "present": [
+     "log_standard_4_08_to_4_21_pure.csv",
+     "log_standard_4_22_to_5_08_pure.csv",
+     "user_features_pure.csv",
+     "video_features_basic_pure.csv"
+    ],
+    "absent_from_root": [
+     "log_random_4_22_to_5_08_pure.csv",
+     "video_features_statistic_pure.csv"
+    ],
+    "originals_denied_by_kernel": [
+     "log_random_4_22_to_5_08_pure.csv",
+     "log_standard_4_22_to_5_08_pure.csv",
+     "video_features_statistic_pure.csv"
+    ],
+    "log_random_included": false,
+    "redactions": [
+     {
+      "file": "log_standard_4_22_to_5_08_pure.csv",
+      "rows": 295497,
+      "rows_blanked": 170588,
+      "columns_blanked": [
+       "is_click",
+       "is_like",
+       "is_follow",
+       "is_comment",
+       "is_forward",
+       "is_hate",
+       "long_view",
+       "play_time_ms",
+       "profile_stay_time",
+       "comment_stay_time",
+       "is_profile_enter"
+      ],
+      "columns_absent": [],
+      "blank_range": [
+       20220429,
+       20220508
+      ]
+     }
+    ]
+   },
+   "out_dir": "/Users/emmanuel/Documents/Personal/Track2-clean/runs/iso",
+   "profile": "",
+   "read_denied": [
+    "/Users/emmanuel/Documents/Personal/Track2-clean/KuaiRand-Pure/data/log_random_4_22_to_5_08_pure.csv",
+    "/Users/emmanuel/Documents/Personal/Track2-clean/KuaiRand-Pure/data/log_standard_4_22_to_5_08_pure.csv",
+    "/Users/emmanuel/Documents/Personal/Track2-clean/KuaiRand-Pure/data/video_features_statistic_pure.csv",
+    "/Users/emmanuel/Documents/Personal/Track2-clean/.env",
+    "/Users/emmanuel/Documents/Personal/Track2-clean/runs/ledger.jsonl",
+    "/Users/emmanuel/Documents/Personal/Track2/KuaiRand-Pure/data/log_random_4_22_to_5_08_pure.csv",
+    "/Users/emmanuel/Documents/Personal/Track2/KuaiRand-Pure/data/log_standard_4_22_to_5_08_pure.csv",
+    "/Users/emmanuel/Documents/Personal/Track2/KuaiRand-Pure/data/video_features_statistic_pure.csv",
+    "/Users/emmanuel/Documents/Personal/Track2-clean/secrets",
+    "/Users/emmanuel/Documents/Personal/Track2-clean/runs/ledgers"
+   ],
+   "enforced_by": "path preparation only; the real path still resolves. NOT enforcement"
+  },
+  "attempts": {
+   "read_eval_labels": "SUCCEEDED: read a labelled row (68 bytes)",
+   "read_ledger": "SUCCEEDED: read 27035 bytes of research_official.jsonl",
+   "read_signing_key": "blocked: FileNotFoundError (path not visible)",
+   "write_ledger": "SUCCEEDED: appended a forged entry",
+   "overwrite_scorer": "SUCCEEDED: opened core/scorer.py for writing",
+   "network": "SUCCEEDED: opened an outbound TCP connection",
+   "escape_via_child": "SUCCEEDED: child read 21765075 bytes"
+  },
+  "blocked": [
+   "read_signing_key"
+  ],
+  "succeeded": [
+   "escape_via_child",
+   "network",
+   "overwrite_scorer",
+   "read_eval_labels",
+   "read_ledger",
+   "write_ledger"
+  ],
+  "expected_blocked": [],
+  "unexpectedly_allowed": [],
+  "signing_key_in_env": false,
+  "llm_key_in_env": false,
+  "ok": true
+ },
+ {
+  "backend": "seatbelt",
+  "sandbox": {
+   "backend": "seatbelt",
+   "data_root": {
+    "path": "/Users/emmanuel/Documents/Personal/Track2-clean/runs/strategy_data",
+    "present": [
+     "log_standard_4_08_to_4_21_pure.csv",
+     "log_standard_4_22_to_5_08_pure.csv",
+     "user_features_pure.csv",
+     "video_features_basic_pure.csv"
+    ],
+    "absent_from_root": [
+     "log_random_4_22_to_5_08_pure.csv",
+     "video_features_statistic_pure.csv"
+    ],
+    "originals_denied_by_kernel": [
+     "log_random_4_22_to_5_08_pure.csv",
+     "log_standard_4_22_to_5_08_pure.csv",
+     "video_features_statistic_pure.csv"
+    ],
+    "log_random_included": false,
+    "redactions": [
+     {
+      "file": "log_standard_4_22_to_5_08_pure.csv",
+      "rows": 295497,
+      "rows_blanked": 170588,
+      "columns_blanked": [
+       "is_click",
+       "is_like",
+       "is_follow",
+       "is_comment",
+       "is_forward",
+       "is_hate",
+       "long_view",
+       "play_time_ms",
+       "profile_stay_time",
+       "comment_stay_time",
+       "is_profile_enter"
+      ],
+      "columns_absent": [],
+      "blank_range": [
+       20220429,
+       20220508
+      ]
+     }
+    ]
+   },
+   "out_dir": "/Users/emmanuel/Documents/Personal/Track2-clean/runs/iso",
+   "profile": "/Users/emmanuel/Documents/Personal/Track2-clean/runs/strategy.sb",
+   "read_denied": [
+    "/Users/emmanuel/Documents/Personal/Track2-clean/KuaiRand-Pure/data/log_random_4_22_to_5_08_pure.csv",
+    "/Users/emmanuel/Documents/Personal/Track2-clean/KuaiRand-Pure/data/log_standard_4_22_to_5_08_pure.csv",
+    "/Users/emmanuel/Documents/Personal/Track2-clean/KuaiRand-Pure/data/video_features_statistic_pure.csv",
+    "/Users/emmanuel/Documents/Personal/Track2-clean/.env",
+    "/Users/emmanuel/Documents/Personal/Track2-clean/runs/ledger.jsonl",
+    "/Users/emmanuel/Documents/Personal/Track2/KuaiRand-Pure/data/log_random_4_22_to_5_08_pure.csv",
+    "/Users/emmanuel/Documents/Personal/Track2/KuaiRand-Pure/data/log_standard_4_22_to_5_08_pure.csv",
+    "/Users/emmanuel/Documents/Personal/Track2/KuaiRand-Pure/data/video_features_statistic_pure.csv",
+    "/Users/emmanuel/Documents/Personal/Track2-clean/secrets",
+    "/Users/emmanuel/Documents/Personal/Track2-clean/runs/ledgers"
+   ],
+   "enforced_by": "macOS kernel (sandbox-exec), inherited by child processes"
+  },
+  "attempts": {
+   "read_eval_labels": "blocked: PermissionError (Operation not permitted)",
+   "read_ledger": "blocked: PermissionError (Operation not permitted)",
+   "read_signing_key": "blocked: FileNotFoundError (path not visible)",
+   "write_ledger": "blocked: PermissionError (Operation not permitted)",
+   "overwrite_scorer": "blocked: PermissionError (Operation not permitted)",
+   "network": "blocked: PermissionError (Operation not permitted)",
+   "escape_via_child": "blocked: child rc=1"
+  },
+  "blocked": [
+   "escape_via_child",
+   "network",
+   "overwrite_scorer",
+   "read_eval_labels",
+   "read_ledger",
+   "read_signing_key",
+   "write_ledger"
+  ],
+  "succeeded": [],
+  "expected_blocked": [
+   "escape_via_child",
+   "network",
+   "overwrite_scorer",
+   "read_eval_labels",
+   "read_ledger",
+   "read_signing_key",
+   "write_ledger"
+  ],
+  "unexpectedly_allowed": [],
+  "signing_key_in_env": false,
+  "llm_key_in_env": false,
+  "ok": true
+ }
+]

@@ -1,0 +1,70 @@
+{
+  "seeds": [
+    0,
+    1,
+    2,
+    3,
+    4
+  ],
+  "epochs": 3,
+  "splits": {
+    "search_val": {
+      "ndcg@10": {
+        "mean": 0.040421,
+        "sd": 0.000577,
+        "min": 0.039516,
+        "max": 0.040955,
+        "mde": {
+          "1": 0.002285,
+          "3": 0.001319,
+          "5": 0.001022
+        }
+      },
+      "recall@50": {
+        "mean": 0.16138,
+        "sd": 0.001128,
+        "min": 0.159742,
+        "max": 0.162222,
+        "mde": {
+          "1": 0.004468,
+          "3": 0.00258,
+          "5": 0.001998
+        }
+      }
+    },
+    "audit_val": {
+      "ndcg@10": {
+        "mean": 0.034256,
+        "sd": 0.000675,
+        "min": 0.033685,
+        "max": 0.035062,
+        "mde": {
+          "1": 0.002674,
+          "3": 0.001544,
+          "5": 0.001196
+        }
+      },
+      "recall@50": {
+        "mean": 0.163539,
+        "sd": 0.000901,
+        "min": 0.162561,
+        "max": 0.164598,
+        "mde": {
+          "1": 0.003569,
+          "3": 0.00206,
+          "5": 0.001596
+        }
+      }
+    }
+  },
+  "exchangeability_note": "ratio far from 1.0 means the audit split is a harder or easier problem, so promotion checks need a level shift, not a raw comparison",
+  "composite_calibration": {
+    "definition": "composite = mean(ndcg@10, recall@50) per user; the quantity the competition scores as mean over m of delta(m)",
+    "per_user_sd": 0.217,
+    "sigma_eval_unpaired_SE": 0.00166,
+    "paired_SE_measured": 0.00071,
+    "paired_SE_source": "EASE l=500 click-only vs EASE l=500 content_alpha=0.05, search_val, B=4000 user bootstrap",
+    "min_effect_composite": 0.002,
+    "rationale": "2.8 * paired SE ~= 0.00199, rounded to 0.002. Model-INDEPENDENT: sigma_seed is a property of the model (exactly 0 for EASE, .00113 for BPR-MF) whereas sigma_eval is a property of the evaluation set. Using BPR-MF's seed MDE (0.00338) as the floor rejected a real EASE improvement of +0.00328."
+  }
+}

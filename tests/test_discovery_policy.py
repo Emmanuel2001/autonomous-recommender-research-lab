@@ -14,6 +14,8 @@ from agent import control_launch as CL
 from agent import research_driver as RD
 from agent.research_agent import (code_prompt, judge_prompt, tournament_prompt,
                                   tournament_schema)
+from core.ledger import canonical
+from core.scorer import MAX_RECORD_BYTES
 
 R = []
 
@@ -127,6 +129,36 @@ check("structured output permits architecture identity fields",
 _, cp = code_prompt({"hypothesis": "test"}, {"model.py": "# model"}, None, 0, state)
 check("coder gets the executable dependency declaration syntax",
       "# requires: package-name" in cp and "field alone does not install" in cp)
+
+print("== eight rich hypotheses fit the signed record cap")
+rich = [dict(c) for c in cands] + [candidate("C7", "feature_preprocessing", ["features.py"]),
+                                   candidate("C8", "objective_loss", ["train.py"])]
+for c in rich:
+    for k in ("hypothesis", "mechanism", "information_value", "novelty_vs_history",
+              "architecture_change", "implementation_risk", "leakage_risk"):
+        c[k] = (str(c.get(k) or k) + " long recorded explanation") * 80
+rv = verdict(arch["id"])
+rv["ranking"] = [{"id": c["id"], "rank": i + 1,
+                  "score_evidence": 1, "score_expected_impact": 1,
+                  "score_novelty": 1, "score_information_value": 1,
+                  "score_cpu_feasibility": 1, "score_implementation_risk": 1,
+                  "note": "long judge note " * 200}
+                 for i, c in enumerate(rich)]
+rv["why_selected"] = "long selection reason " * 500
+rv["architecture_verdicts"][0]["reason"] = "long architecture reason " * 500
+meta = RD.bounded_tournament_record(
+    cands=rich, coverage=discovery_ok, verdict=rv,
+    plan={"_candidate_id": arch["id"]}, selection_how="judge_selected_id",
+    search_mode="discovery", architecture_required=True)
+record_body = {"run_id": "test", "iteration": 3, "what": "tournament",
+               "policy": "tournament", "tournament_size": 8, **meta}
+record_bytes = len(canonical(record_body))
+check("maximal eight-candidate tournament stays under MAX_RECORD_BYTES",
+      record_bytes < MAX_RECORD_BYTES, f"{record_bytes} < {MAX_RECORD_BYTES}")
+check("the bounded record retains all eight candidates and the full ranking",
+      len(meta["candidates"]) == len(meta["judge"]["ranking"]) == 8)
+check("the selected hypothesis remains readable after bounding",
+      bool(meta["candidates"][0]["hypothesis"]) and bool(meta["candidates"][0]["mechanism"]))
 
 print("== CLI and console launcher keep discovery opt-in")
 parser = RD.build_parser()

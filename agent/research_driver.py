@@ -341,6 +341,68 @@ def candidate_to_plan(cand: dict) -> dict:
     }
 
 
+def bounded_tournament_record(*, cands: list, coverage: dict, verdict: dict,
+                              plan: dict, selection_how: str, search_mode: str,
+                              architecture_required: bool) -> dict:
+    """A complete-enough tournament record that always leaves room under the scorer cap.
+
+    Eight live hypotheses exceeded the 12,288-byte signed-body limit before any candidate
+    could run. The full response already paid for that information, but the audit trail
+    needs the decision, mechanism and ranking -- not unlimited prose. Bounds apply only to
+    the signed presentation record; the chosen plan sent to the coder remains unabridged.
+    """
+    def s(value, n):
+        return str(value or "")[:n]
+
+    candidates = []
+    for c in cands:
+        candidates.append({
+            "id": s(c.get("id"), 24), "lane": s(c.get("lane"), 32),
+            "hypothesis": s(c.get("hypothesis"), 160),
+            "mechanism": s(c.get("mechanism"), 160),
+            "expected_direction": s(c.get("expected_direction"), 16),
+            "expected_magnitude": c.get("expected_magnitude"),
+            "information_value": s(c.get("information_value"), 100),
+            "model_family": s(c.get("model_family"), 50),
+            "architecture_change": s(c.get("architecture_change"), 100),
+            "files_to_change": [s(x, 40) for x in (c.get("files_to_change") or [])[:8]],
+            "implementation_risk": s(c.get("implementation_risk"), 60),
+        })
+    ranking = []
+    for r in (verdict.get("ranking") or [])[:12]:
+        if not isinstance(r, dict):
+            continue
+        ranking.append({k: (s(r.get(k), 24) if k == "id" else r.get(k))
+                        for k in ("id", "rank", "score_evidence",
+                                  "score_expected_impact", "score_novelty",
+                                  "score_information_value", "score_cpu_feasibility",
+                                  "score_implementation_risk")})
+    arch_verdicts = [
+        {"candidate_id": s(v.get("candidate_id"), 24),
+         "verdict": s(v.get("verdict"), 16),
+         "reason": s(v.get("reason"), 140)}
+        for v in (verdict.get("architecture_verdicts") or [])[:12]
+        if isinstance(v, dict)]
+    return {
+        "coverage": coverage, "selection_how": selection_how,
+        "search_mode": search_mode,
+        "architecture_selection_required": architecture_required,
+        "selected_id": plan.get("_candidate_id"),
+        "candidates": candidates,
+        "judge": {
+            "selected_id": s(verdict.get("selected_id"), 24),
+            "ranking": ranking,
+            "why_selected": s(verdict.get("why_selected"), 350),
+            "architecture_verdicts": arch_verdicts,
+            "exploit_or_explore": s(verdict.get("exploit_or_explore"), 16),
+            "convergence_note": s(verdict.get("convergence_note"), 120),
+        },
+        "record_note": ("candidate prose is bounded for the signed 12,288-byte record; "
+                        "novelty/runtime/leakage prose and ranking notes are omitted; the "
+                        "selected coder plan is unabridged"),
+    }
+
+
 def select_from_tournament(cands: list, verdict: dict) -> tuple[dict, str]:
     """The judge's pick, or the top-ranked candidate if the id does not resolve."""
     want = str(verdict.get("selected_id") or "").strip()
@@ -760,25 +822,10 @@ def research_loop(*, agent, splits, edges, spec, state: ResearchState, budget: B
                         stats["lane_coverage_violations"] += 1
                         say(f"       tournament missed required lanes: "
                             f"{cov['missing_required_lanes']} (recorded, not hidden)")
-                    tourn_meta = {
-                        "coverage": cov, "selection_how": how,
-                        "search_mode": search_mode,
-                        "architecture_selection_required": architecture_due,
-                        "selected_id": plan.get("_candidate_id"),
-                        "candidates": [
-                            {k: c.get(k) for k in
-                             ("id", "lane", "hypothesis", "mechanism",
-                              "expected_direction", "expected_magnitude",
-                              "information_value", "novelty_vs_history",
-                              "model_family", "architecture_change",
-                              "files_to_change", "runtime_estimate",
-                              "implementation_risk", "leakage_risk")}
-                            for c in cands],
-                        "judge": {k: verdict.get(k) for k in
-                                  ("selected_id", "ranking", "why_selected",
-                                   "architecture_verdicts", "exploit_or_explore",
-                                   "convergence_note")},
-                    }
+                    tourn_meta = bounded_tournament_record(
+                        cands=cands, coverage=cov, verdict=verdict, plan=plan,
+                        selection_how=how, search_mode=search_mode,
+                        architecture_required=architecture_due)
                     say(f"       tournament: {len(cands)} candidates "
                         f"({sum(1 for c in cands if c['lane']=='model_architecture')} "
                         f"architecture) -> chose {plan.get('_candidate_id')} "

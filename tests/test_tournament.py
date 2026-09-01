@@ -231,11 +231,12 @@ try:
     for lane in REQUIRED_LANES:
         check(f"a candidate was considered in {lane}", cov["per_lane"][lane] >= 1)
     cands = tourns[0]["payload"]["body"]["candidates"]
-    check("candidates carry every required hypothesis field",
+    check("bounded signed candidates carry every executable hypothesis field",
           all(all(k in c for k in ("id", "lane", "hypothesis", "mechanism",
-                                  "expected_magnitude", "information_value",
-                                  "novelty_vs_history", "files_to_change",
-                                  "leakage_risk", "implementation_risk"))
+                                  "expected_direction", "expected_magnitude",
+                                  "information_value", "files_to_change",
+                                  "implementation_risk", "model_family",
+                                  "architecture_change"))
               for c in cands), str(sorted(cands[0])))
     check("stats count architecture candidates considered",
           st["architecture_considered"] == 3, str(st["architecture_considered"]))

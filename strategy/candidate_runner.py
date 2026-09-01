@@ -173,6 +173,30 @@ def main() -> None:
                 # Telemetry is a courtesy; a candidate must not fail its whole fit
                 # because a numpy scalar could not be serialised. Recorded, not hidden.
                 meta["telemetry_error"] = f"{type(e).__name__}: {str(e)[:200]}"
+        # The harness can prove which device it made available to the candidate, but an
+        # arbitrary generated program can still ignore TRACK2_DEVICE.  Preserve the
+        # candidate's own claim separately; never relabel the resolved target as observed
+        # execution.  A missing claim is useful evidence (and was exposed by a generated
+        # DeepFM which received mps but created every tensor on CPU).
+        if isinstance(tel, dict):
+            claimed_framework = tel.get("framework")
+            claimed_device = tel.get("device")
+            if claimed_framework is not None:
+                meta["execution"]["candidate_reported_framework"] = str(claimed_framework)
+            if claimed_device is not None:
+                meta["execution"]["candidate_reported_device"] = str(claimed_device)
+        target_framework = meta["execution"]["framework"]
+        target_device = meta["execution"]["device"]
+        claimed_framework = meta["execution"].get("candidate_reported_framework")
+        claimed_device = meta["execution"].get("candidate_reported_device")
+        if claimed_framework is None or claimed_device is None:
+            meta["execution"]["candidate_report_status"] = "unreported"
+        elif claimed_framework == target_framework and claimed_device == target_device:
+            meta["execution"]["candidate_report_status"] = "reported_match"
+        else:
+            meta["execution"]["candidate_report_status"] = "reported_mismatch"
+        meta["execution"]["candidate_report_note"] = (
+            "candidate telemetry is self-reported; the harness only attests the resolved target")
         meta.update(ok=True, dev_rows=int(dv.size), heldout_rows=int(hv.size),
                     train_subset_rows=int(sv.size), train_subset_hash=sub_hash,
                     fit_seconds=round(fit_s, 2), dev_split=dev_name,

@@ -276,10 +276,11 @@ def run_candidate(files: dict, params: dict | None = None, *, run_dir: Path,
                          f"{dep_report['failed']}",
                 "contract_violation": False, "static": meta}
 
-    # Resolve numerical hardware before entering the sandbox.  Generated code receives
-    # only a declared framework/device, never permission to inspect or launch arbitrary
-    # host processes.  The resolution report is attached to the result so "GPU" is a
-    # measured property of an experiment, not a claim in its prose.
+    # Resolve numerical hardware before entering the sandbox. Generated code receives only
+    # a declared framework/device, never permission to inspect or launch arbitrary host
+    # processes. This proves the execution TARGET is available; it does not by itself prove
+    # arbitrary generated code used that target. candidate_runner preserves the candidate's
+    # separate self-report so the UI cannot turn resolution into an "actual GPU" claim.
     from core import execution as EX
     try:
         experiment = EX.ExperimentSpec.from_candidate(
@@ -336,7 +337,13 @@ def run_candidate(files: dict, params: dict | None = None, *, run_dir: Path,
     report["static"] = meta
     report["dependencies"] = dep_report
     report["experiment_spec"] = experiment.to_dict()
-    report["execution"] = execution.to_dict()
+    child_execution = report.get("execution") if isinstance(report.get("execution"), dict) else {}
+    execution_record = execution.to_dict()
+    for key in ("candidate_reported_framework", "candidate_reported_device",
+                "candidate_report_status", "candidate_report_note"):
+        if key in child_execution:
+            execution_record[key] = child_execution[key]
+    report["execution"] = execution_record
     report["isolation"] = sb.backend
     report["run_dir"] = str(run_dir)
     report["dev_scores"] = str(run_dir / "dev_scores.npy")

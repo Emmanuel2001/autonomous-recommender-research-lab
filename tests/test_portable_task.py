@@ -121,11 +121,15 @@ with tempfile.TemporaryDirectory(prefix="track2-portable-") as td:
           json.dumps({k: accelerated.get(k) for k in ("error_type", "error")}))
     if accelerated.get("ok"):
         plan = accelerated["execution"]
-        check("accelerated run records framework and actual device",
+        check("accelerated run records framework and resolved target",
               plan["framework"] == "torch" and plan["device"] in ("cpu", "mps", "cuda"))
         telemetry = json.loads((Path(accelerated["run_dir"]) / "telemetry.json").read_text())
         check("training telemetry records the same resolved device",
               telemetry["device"] == plan["device"] and telemetry["framework"] == "torch")
+        check("runner keeps candidate device evidence separate from target resolution",
+              plan.get("candidate_reported_device") == plan["device"] and
+              plan.get("candidate_reported_framework") == "torch" and
+              plan.get("candidate_report_status") == "reported_match", str(plan))
 
 print()
 print("== a task declaration cannot choose inputs outside its declared data_dir")

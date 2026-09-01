@@ -211,6 +211,7 @@ share a ledger with a compliant one.
 | `arch_smoke1` | `runs/ledgers/arch_smoke1.jsonl` | `minimal` | 1 | capped at 1 | 30,069 |
 | `breadth_diag1` | `runs/ledger.jsonl` | `minimal` | 6 | **convergence off — diagnostic** | 217,666 |
 | `research_submission1` | `runs/ledgers/research_submission.jsonl` | `inherited` | 3 | **official** (ε=0.002, N=3) | 102,210 |
+| `architecture_discovery2` | `runs/ledgers/architecture_discovery2.jsonl` | `minimal` | 7 | **discovery; convergence off — diagnostic** | 301,168 |
 
 What they establish:
 
@@ -223,10 +224,16 @@ What they establish:
   (`m.lr = base_lr * 0.5 * (1.0 + np.cos(np.pi * (ep - 1) / epochs))`). The superseded
   typed-action policy could never edit source at all. The gain attributable to that iteration
   is **+0.000029 and unconfirmed** — the edit is the autonomy evidence, not the improvement.
-* **Architecture has been considered repeatedly and never promoted.** Nine `model_architecture`
-  candidates across the two multi-iteration runs; `architecture_selected` is 0 in both. The
-  report states this in its own words rather than letting the *considered* column imply
-  otherwise.
+* **A stronger-tier discovery run selected and executed a real architecture.** In
+  `architecture_discovery2`, Gemini 3.5 Flash planned and judged 32 recorded candidates; the
+  judge funded a PyTorch DeepFM change spanning `model.py`, `train.py` and `config.json`.
+  The candidate ran successfully but was rejected at **0.572274 (−0.029422)** while its
+  train/dev gap widened from 0.0852 to 0.1498. The exact 12,561-byte source diff is retained.
+* **Hardware resolution is not hardware attestation.** The harness resolved that Torch
+  candidate to Apple MPS, but the generated source ignored `TRACK2_DEVICE` and created its
+  model and tensors on CPU. The score is valid; an “MPS executed” claim for that candidate is
+  not. The console now displays the resolved target separately from candidate-reported device
+  evidence, and future coder prompts explicitly require device propagation.
 
 What they do **not** establish, stated precisely because the distinction is easy to blur:
 
@@ -252,9 +259,11 @@ So the repository still separates a **capability** from the **behaviour** observ
 
 ## 12. Honest limitations
 
-* Only the cheapest model tier (`gemini-3.5-flash-lite`, 500 requests/day) has ever driven
-  the recorded runs. Whether a stronger planner/judge produces better research decisions is
-  untested; the discovery policy makes that comparison possible but does not pre-answer it.
+* A stronger planner/judge has now driven one diagnostic run: Gemini 3.5 Flash for planning and
+  judging, with Flash Lite for coding and reflection. It produced broader architecture choices,
+  but **did not produce a better recommender**. Three of seven iterations ended at the provider
+  layer (timeout, incomplete response, and the free-tier 20-request quota), so LLM reliability
+  and quota were material limits even though only 301,168 of 1.8M configured tokens were used.
 * The research policy is **high-variance**: across the seven official-convergence runs in
   these ledgers (excluding the one-iteration smoke test), **4 beat the baseline and 3 did
   not** — `research_live1`, `trial_2`, `trial_4` and `research_submission1` improved on it;
@@ -289,9 +298,10 @@ So the repository still separates a **capability** from the **behaviour** observ
 * The train/dev gap is a **diagnostic**: the harness verifies the *size* of the returned
   train-subset vector but cannot verify which rows produced it.
 * Docker command construction (including read-only source mounts and CUDA passthrough) is
-  tested, but a real Docker daemon and CUDA device were unavailable on this Mac. The measured
-  local accelerated fit resolved to CPU; MPS/CUDA execution must be verified on a host that
-  reports either device available.
+  tested, but a real Docker daemon and CUDA device were unavailable on this Mac. The controlled
+  accelerated profile has exercised MPS; arbitrary agent-written Torch code can still ignore
+  its resolved target, so its device use remains **unverified unless separately reported and
+  inspected**. The discovery DeepFM exposed exactly that distinction.
 * The history is **local only** — no remote and nothing pushed, by instruction.
   The dataset, credentials, fitted models and prediction vectors are excluded; the signed
   ledgers, the artifact store and the submitted prediction file are committed, because a

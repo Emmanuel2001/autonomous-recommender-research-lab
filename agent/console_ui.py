@@ -371,18 +371,34 @@ def digest(entries: list[dict], run_name: str = "") -> dict:
     d["exec"] = {"framework": ep.get("framework"), "requested": ep.get("device"),
                  "policy": ep.get("accelerator_policy"),
                  "fallback_allowed": ep.get("allow_fallback"),
-                 "resolved": None, "resolved_source": None}
-    # The RESOLVED device is harness-owned state, not a ledger field. Read it if it is on
-    # disk and say where it came from; otherwise leave it as an explicit empty state rather
-    # than echoing the request back as though it were the outcome.
+                 "resolved": None, "candidate_reported": None,
+                 "candidate_report_status": None, "resolved_source": None}
+    # The RESOLVED TARGET is harness-owned state, not a ledger field. Arbitrary candidate
+    # code can ignore it, so preserve candidate-reported evidence separately and never call
+    # resolution "actual device". Also merge execution per iteration: a mixed NumPy/Torch
+    # run must not display the final candidate's device on every experiment row.
     if run_name:
         sp = ROOT / "runs" / "candidates" / Path(run_name).stem.replace(".jsonl", "") / "state.json"
         try:
             st = json.loads(sp.read_text())
-            ex = [x.get("execution") for x in (st.get("experiments") or []) if x.get("execution")]
-            if ex:
-                d["exec"]["resolved"] = ex[-1].get("device")
-                d["exec"]["fallback_used"] = ex[-1].get("fallback_used")
+            state_experiments = [x for x in (st.get("experiments") or [])
+                                 if x.get("execution")]
+            by_iteration = {x.get("iteration"): x.get("execution")
+                            for x in state_experiments}
+            for row in d["iterations"]:
+                if row.get("iteration") in by_iteration:
+                    row["execution"] = by_iteration[row.get("iteration")]
+            champion_iteration = (st.get("champion") or {}).get("iteration")
+            chosen = next((x for x in state_experiments
+                           if x.get("iteration") == champion_iteration), None)
+            chosen = chosen or (state_experiments[-1] if state_experiments else None)
+            if chosen:
+                ex = chosen.get("execution") or {}
+                d["exec"]["resolved"] = ex.get("device")
+                d["exec"]["resolved_framework"] = ex.get("framework")
+                d["exec"]["candidate_reported"] = ex.get("candidate_reported_device")
+                d["exec"]["candidate_report_status"] = ex.get("candidate_report_status")
+                d["exec"]["fallback_used"] = ex.get("fallback_used")
                 d["exec"]["resolved_source"] = str(sp.relative_to(ROOT))
         except (OSError, ValueError, KeyError):
             pass
@@ -396,20 +412,37 @@ def _fmt_secs(s) -> str:
     return f"{s:.1f}s" if s < 90 else f"{s/60:.1f} min"
 
 
+def _device_evidence(ex: dict | None) -> str:
+    """Render a target and the weaker candidate-reported evidence without conflating them."""
+    ex = ex or {}
+    target = ex.get("device") or ex.get("resolved")
+    reported = ex.get("candidate_reported_device") or ex.get("candidate_reported")
+    status = ex.get("candidate_report_status")
+    if target is None:
+        return "not recorded"
+    if status == "reported_match" and reported:
+        return f"{target} target; candidate reported {reported}"
+    if status == "reported_mismatch" and reported:
+        return f"{target} target; candidate reported {reported} (mismatch)"
+    return f"{target} target; use unverified"
+
+
 # ===================================================================== 1. overview
 def view_overview(d: dict, run_state: str, scorer_ready: bool) -> str:
     m, ex = d["m"], d["exec"]
     routing = d["start"].get("model_routing") or {}
     models = sorted({v for v in routing.values() if v}) or [d["start"].get("model")]
     dev = esc(ex.get("resolved") or "not recorded")
+    reported = esc(ex.get("candidate_reported") or "unverified")
     strip = [
         ("run status", run_state),
         ("search mode", dash(d["start"].get("search_mode") or "standard")),
         ("task", dash(d["start"].get("task"))),
         ("llm / model", dash(", ".join(str(x) for x in models if x))),
-        ("framework", dash(ex.get("framework"))),
-        ("device req &rarr; resolved",
+        ("framework", dash(ex.get("resolved_framework") or ex.get("framework"))),
+        ("device request &rarr; resolved target",
          f"{esc(ex.get('requested') or '?')} &rarr; <b>{dev}</b>"),
+        ("candidate device report", reported),
         ("iteration", f"{m['iterations'] if m['iterations'] is not None else '&mdash;'}"
                       f" / {m['max_iterations'] if m['max_iterations'] is not None else '&mdash;'}"),
         ("termination", dash(m["termination"])),
@@ -711,11 +744,12 @@ def view_experiments(d: dict) -> str:
             f"<td class='n {'pos' if (act or 0) > 0 else 'neg' if (act or 0) < 0 else ''}'>"
             f"{num(act, 6, True)}</td>"
             f"<td class=n>{num(i.get('dev_primary'))}</td>"
-            f"<td class=mono>{dash(d['exec'].get('resolved'))}</td>"
+            f"<td class=mono>{esc(_device_evidence(i.get('execution')))}</td>"
             f"<td class=n>{_fmt_secs(cost.get('wall_seconds'))}</td>"
             f"<td><span class='badge {ob}'>{esc(out)}</span></td></tr>")
     head = ("<tr><th>it</th><th>lane</th><th>hypothesis</th><th>files changed</th>"
-            "<th>expected &Delta;</th><th>actual &Delta;</th><th>score</th><th>device</th>"
+            "<th>expected &Delta;</th><th>actual &Delta;</th><th>score</th>"
+            "<th>device target / evidence</th>"
             "<th>runtime</th><th>outcome</th></tr>")
     return (f"<h2>Experiment comparison</h2>"
             f"<p class=sub>Expected against actual, per iteration. The agent's predicted "

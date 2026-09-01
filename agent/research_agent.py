@@ -538,6 +538,12 @@ THE PARENT SOURCE YOU ARE EDITING
 inherit the parent's copy. Change only what the hypothesis needs -- a candidate that
 changes four things at once cannot attribute its own result.
 
+If you return a Torch candidate, `train.py` MUST read `TRACK2_DEVICE`, move the model and
+every training and inference tensor to that device, and include `framework: "torch"` plus
+the used `device` in returned telemetry. Do not merely import torch while computing on CPU.
+The harness records the resolved target separately and will label missing candidate device
+telemetry as unverified.
+
 If the candidate needs an allowed package that is not already part of the seed, name it in
 `dependencies` AND add an exact `# requires: package-name` comment to one returned Python
 file. The harness resolves only these source declarations outside the network-denied sandbox;

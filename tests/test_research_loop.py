@@ -17,7 +17,7 @@ Speed: the seed is given a 1-epoch configuration and isolation is 'none'. The sa
 measured separately (tests/test_isolation.py, and the cross-candidate write probe in
 test_candidate.py); what is under test here is the LOOP.
 """
-import json, os, subprocess, sys, time
+import json, os, shutil, subprocess, sys, time
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]

@@ -85,6 +85,16 @@ That convergence is the most useful scientific finding here: **pairwise ranking 
 observed lever**, and two materially different surrounding configurations built on the same
 pairwise implementation land within 0.00005 of each other.
 
+**A stronger-tier architecture discovery run did not beat it.** Gemini 3.5 Flash planned and
+judged a seven-iteration diagnostic run from the pointwise-only minimal seed. It considered 32
+signed hypotheses, trained four candidates, and autonomously wrote a PyTorch DeepFM across
+`model.py`, `train.py` and `config.json`. DeepFM scored **0.572274 (−0.029422)** and widened the
+train/dev gap from 0.0852 to 0.1498, so it was rejected. A rank-based checkpoint ensemble was the
+only promotion, at **+0.000064**—valid but negligible and still well below the frozen 0.604074
+champion. The run used 301,168 tokens and ended with one timeout, one incomplete provider
+response and one free-tier quota error; all three failures are retained in the 38-entry signed
+ledger.
+
 ## Challenges — the parts that failed
 
 This is the section I would most want a judge to read, because the failures are better evidence
@@ -111,10 +121,17 @@ stood and `"dropout": 0.1` was dead code. The result was **bit-identical to its 
 significant figures**, and deduplication could not see it because the tree hash genuinely
 differed. 38,113 tokens re-derived the champion.
 
-**Architecture was considered nine times and promoted zero times.** Lane coverage is
-*required* by the tournament validator, so a `model_architecture` candidate appearing is the
-policy working — not the agent showing initiative. The report says this in its own words rather
-than letting a "considered" column imply curiosity.
+**The first funded architecture made overfitting worse.** The discovery judge selected DeepFM
+from an eight-candidate tournament and the coder produced a genuine 12,561-byte structural diff.
+It trained successfully, but extra capacity raised train primary to 0.722080 while validation
+reached only 0.572274. This is evidence that the architecture actuator works—not evidence that
+DeepFM is a good model for this task without careful sparse-feature and optimiser tuning.
+
+**The DeepFM did not actually use MPS, despite an MPS target.** The harness correctly measured
+MPS availability and supplied `TRACK2_DEVICE=mps`; the generated code ignored it and constructed
+CPU tensors. That exposed an observability defect: a resolved device is not proof of use. The UI
+and execution records now keep “resolved target” and candidate-reported evidence separate, and
+future Torch coder instructions require the model and all tensors to move to the supplied device.
 
 **The agent over-predicted its own gain on essentially every scored iteration.** Predicted and
 actual are printed side by side rather than hidden.
@@ -151,14 +168,17 @@ which I confirmed fails when the fix is reverted.
   that is.
 - **The submission is bound to a promoted artifact**, not reconstructed from a config after the
   fact.
-- **28 test suites**, including adversarial tournament cases, a sandbox escape attempt via a
+- **35 test suites**, including adversarial tournament cases, a sandbox escape attempt via a
   symlinked dataset, and a scanner that fails the build on stale claims in the documentation.
 
 ## Limitations
 
-- Only the cheapest model tier (`gemini-3.5-flash-lite`) has ever driven this loop. Whether a
-  stronger tier reaches for architecture is untested.
-- No `model_architecture` candidate has been selected and successfully promoted.
+- One stronger-tier diagnostic run is now recorded. It reached for architecture, but the result
+  was worse; better LLM reasoning did not automatically produce a better recommender.
+- One `model_architecture` candidate has been selected and executed, but none has been promoted.
+  The first DeepFM attempt is a single negative result, not a general rejection of neural models.
+- Provider reliability limited the run: three of seven iterations ended before training because
+  of a timeout, incomplete structured response, and a 20-request free-tier quota.
 - The secondary effects around the pairwise objective are **small or unresolved, not disproved**:
   the negative-sampling change lost on a single search iteration rather than a 20-seed ablation,
   `user_hist_len` helped in the original lineage, and the L2-plus-cosine step was never confirmed
@@ -178,8 +198,9 @@ which I confirmed fails when the fix is reverted.
    deduplication structurally cannot see.
 3. **Component ablations** over 20 seeds, to turn the unresolved secondary effects into
    measurements.
-4. **A stronger tier on the architecture lane**, which is the one open question the budget never
-   let me answer.
+4. **A controlled neural follow-up**, starting by reproducing the NumPy FM in Torch, verifying
+   device use, and only then adding a small deep interaction tower. That separates framework and
+   optimisation errors from the architectural question instead of changing everything at once.
 
 ## How to verify
 

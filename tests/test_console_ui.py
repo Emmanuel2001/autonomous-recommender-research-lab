@@ -184,7 +184,17 @@ check("digest keeps requested device", d["exec"]["requested"] == "mps")
 check("digest keeps resolved device as its own key (None when unrecorded)",
       "resolved" in d["exec"])
 check("overview labels them as request and resolution",
-      "device req" in t.lower() and "resolved" in t.lower())
+      "device request" in t.lower() and "resolved target" in t.lower())
+check("a resolved target without candidate evidence is explicitly unverified",
+      "use unverified" in UI._device_evidence({"device": "mps"}))
+check("matching candidate telemetry remains labelled as candidate-reported",
+      UI._device_evidence({"device": "mps", "candidate_reported_device": "mps",
+                           "candidate_report_status": "reported_match"}) ==
+      "mps target; candidate reported mps")
+check("a device mismatch is conspicuous",
+      "mismatch" in UI._device_evidence(
+          {"device": "mps", "candidate_reported_device": "cpu",
+           "candidate_report_status": "reported_mismatch"}))
 
 print("== raw JSON is a disclosure, not the primary UI")
 check("the reflection JSON sits inside a details element",

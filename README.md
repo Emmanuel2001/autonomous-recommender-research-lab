@@ -7,6 +7,84 @@ behind a kernel sandbox, and is scored by a separate signing process it cannot r
 impressions (*not* full-catalogue retrieval) · **label** `long_view` ·
 **metric** `primary = mean(GAUC, nDCG@5)`.
 
+## Quick start
+
+The Research Console is a local interface backed by two processes: a protected scorer that
+owns the labels and signing key, and the research agent that proposes and trains candidates.
+The full command reference is in [`RUN.md`](RUN.md); the shortest working path is below.
+
+### 1. Install
+
+```bash
+git clone https://github.com/Emmanuel2001/autonomous-recommender-research-lab.git
+cd autonomous-recommender-research-lab
+python3 -m venv .venv
+source .venv/bin/activate
+python3 -m pip install -r requirements.txt
+```
+
+For optional PyTorch CPU, Apple MPS or NVIDIA CUDA candidates, also install
+`requirements-accelerated.txt` (use a CUDA-specific PyTorch build on a CUDA worker).
+
+### 2. Supply the dataset and local secrets
+
+Download KuaiRand-Pure and place or symlink it so that `KuaiRand-Pure/data/` exists at the
+repository root. The dataset is intentionally not redistributed.
+
+```bash
+cp .env.example .env                 # add TRACK2_LLM_API_KEY; this file is gitignored
+mkdir -p secrets
+python3 -m core.scorer keygen        # creates the local signing key; never commit it
+```
+
+### 3. Start the protected scorer (Terminal 1)
+
+```bash
+TRACK2_SIGNING_KEY="$(cat secrets/scorer.key)" \
+TRACK2_LEDGER="runs/ledgers/my_run.jsonl" \
+TRACK2_SOCKET="runs/my_run.sock" \
+python3 -u -m core.scorer serve --task official
+```
+
+### 4. Use the Research Console (Terminal 2)
+
+```bash
+source .venv/bin/activate
+set -a; source .env; set +a
+TRACK2_SOCKET="runs/my_run.sock" python3 -m agent.control --port 8787
+```
+
+Open the tokenized loopback URL printed by the command. In **New Run**, choose a preset,
+review the task, model, hardware and budget, then launch. **Overview** shows the champion and
+budget; **Live Research** shows hypotheses, judging, code changes, training, scoring and
+reflection; **Experiments** compares candidates; **Artifacts & Integrity** exposes the signed
+evidence. The access token stays local and should not be shared.
+
+### 5. Run the agent from the command line instead
+
+Keep Terminal 1 running, then use the same socket in Terminal 2:
+
+```bash
+source .venv/bin/activate
+set -a; source .env; set +a
+TRACK2_SOCKET="runs/my_run.sock" \
+python3 -u -m agent.research_driver \
+  --research-policy tournament --tournament-size 6 \
+  --seed-profile minimal --backend gemini --model gemini-3.5-flash-lite \
+  --iterations 50 --convergence official --run-name my_run
+```
+
+### 6. Verify the repository without spending LLM credits
+
+```bash
+bash tests/run_all.sh
+python3 tests/test_frozen_and_profiles.py
+```
+
+The frozen prediction submitted for judging is
+[`submission_compliant/submission_test.csv`](submission_compliant/submission_test.csv); its
+source and binding manifest are beside it in `submission_compliant/`.
+
 ## 1. The task
 
 Each user was shown a handful of videos — about 5.6 in this data — and the label says whether

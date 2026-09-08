@@ -605,6 +605,51 @@ try:
         check(f"[{kind}+repair] it was not abandoned",
               st2["coverage_aborts"] + st2["judge_aborts"] == 0, str(st2))
 
+    # A paid coder truncation used to exist only in the signed ledger. The next planner
+    # could not see it and selected the same architecture again, while its 32k output was
+    # also absent from the token budget. Drive that exact failure shape through the loop.
+    class TruncatingCoder(FakeAgent):
+        def code(self, plan, parent_source, state, error=None, attempt=0):
+            self.code_plans.append(plan)
+            self.usage.append({
+                "role": "code", "backend": "anthropic", "model": "test-opus",
+                "input_tokens": 123, "output_tokens": 32000, "thinking_tokens": 0,
+                "total_tokens": 32123, "seconds": 2.0, "retries": 0,
+                "refused": False, "truncated": True, "stop_reason": "max_tokens",
+            })
+            raise RuntimeError("role code hit max_tokens before closing its JSON")
+
+    trunc_agent = TruncatingCoder(["M1"])
+    trunc_budget = BUD.Budget(max_iterations=1, max_wall_seconds=1800,
+                              max_tokens=100000)
+    trunc_state = ResearchState({"name": "kuairand_pure"}, {})
+    trunc_root = SCRATCH / "coder_truncation"
+    shutil.rmtree(trunc_root, ignore_errors=True)
+    trunc_before = len(LEDGER_PATH.read_text().splitlines())
+    trunc_out = RD.research_loop(
+        agent=trunc_agent, splits=splits, edges=edges, spec=spec, state=trunc_state,
+        budget=trunc_budget, run_id="coder_truncation", rec=rec, score=score,
+        run_root=trunc_root, backend="none", max_seconds=900,
+        convergence="off", max_repairs=0, verbose=False, seed_files=seed,
+        policy="tournament", tournament_size=6, workspace=WS)
+    trunc_entries = [json.loads(line) for line in
+                     LEDGER_PATH.read_text().splitlines()[trunc_before:] if line.strip()]
+    trunc_errors = [e for e in trunc_entries
+                    if (e["payload"].get("body") or {}).get("what") == "coder_error"]
+    check("a coder truncation becomes a refused experiment in agent state",
+          any(e.outcome == "refused" and e.error_type == "RuntimeError"
+              for e in trunc_state.experiments))
+    check("the next planner prompt contains the coder failure",
+          "RuntimeError" in trunc_state.for_prompt()["failure_registry"])
+    check("failed coder tokens count against the run budget",
+          trunc_out["budget"]["tokens_total"] == 32603,
+          str(trunc_out["budget"]["tokens_total"]))
+    check("coder failure telemetry reaches the signed event",
+          len(trunc_errors) == 1
+          and trunc_errors[0]["payload"]["body"]["llm_call"]["output_tokens"] == 32000)
+    check("a truncated coder response never reaches candidate training",
+          trunc_out["stats"]["evaluated"] == 0)
+
     # -- the per-iteration cost RECORDED IN THE LEDGER must carry a real wall time.
     # This is the assertion that was missing: the old one read budget.costs after the loop,
     # where __exit__ had filled the field, so it passed while every ledger entry said

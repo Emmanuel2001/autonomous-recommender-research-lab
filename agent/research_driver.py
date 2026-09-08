@@ -66,6 +66,12 @@ from core.metrics import OFFICIAL_EPSILON, OFFICIAL_N  # noqa: E402
 #: three tries is not converging on a fix, and each attempt costs a fit.
 MAX_REPAIRS = 3
 
+#: Provider response ceiling for one role call. This is deliberately separate from
+#: ``--max-tokens``, which caps the whole research run. Large architecture replacements can
+#: legitimately need more than 32k output tokens even when the total run remains below its
+#: operator-approved budget.
+DEFAULT_LLM_MAX_OUTPUT_TOKENS = 32_000
+
 #: Leave room in a 12,288-byte record for everything that is NOT the diff.
 INLINE_DIFF_BUDGET = 6000
 
@@ -577,6 +583,22 @@ def research_loop(*, agent, splits, edges, spec, state: ResearchState, budget: B
             say(f"       note: thought-summary record refused ({entry}); "
                 f"{len(summaries)} summarie(s) not recorded")
 
+    def failed_call_usage(since: int) -> dict | None:
+        """Return and charge the newest failed provider call after ``since``.
+
+        Provider calls that truncate or fail can still consume billed tokens. Successful
+        calls are charged at their call sites. This path prevents a failed 32k coder call
+        from disappearing from the run budget merely because it produced no JSON value.
+        """
+        recent = getattr(agent, "usage", [])[since:]
+        failed = next((u for u in reversed(recent)
+                       if u.get("error") or u.get("truncated") or u.get("refused")), None)
+        if failed:
+            it.add_tokens(failed.get("input_tokens", 0),
+                          failed.get("output_tokens", 0),
+                          failed.get("thinking_tokens", 0))
+        return failed
+
     # Convergence and the reference point belong to the task contract.  The official
     # constants remain the backwards-compatible default for historical callers, but a
     # portable task must never silently inherit KuaiRand's stopping rule or baseline.
@@ -891,9 +913,7 @@ def research_loop(*, agent, splits, edges, spec, state: ResearchState, budget: B
                            "error": str(e)[:600]}
                 if tournament_proposal_seq is not None:
                     failure["tournament_proposal_seq"] = tournament_proposal_seq
-                current_usage = getattr(agent, "usage", [])[usage_before_planning:]
-                failed_usage = next((u for u in reversed(current_usage)
-                                     if u.get("error")), None)
+                failed_usage = failed_call_usage(usage_before_planning)
                 if failed_usage:
                     failure["llm_call"] = {
                         k: failed_usage.get(k) for k in
@@ -938,6 +958,7 @@ def research_loop(*, agent, splits, edges, spec, state: ResearchState, budget: B
             # ---- code, then repair on failure. Every executed tree is registered.
             error_ctx, exp, result = None, None, None
             for attempt in range(max_repairs + 1):
+                code_usage_start = len(getattr(agent, "usage", []))
                 try:
                     with it.stage("code"):
                         out, usage = agent.code(plan, parent_files, state.for_prompt(),
@@ -948,10 +969,30 @@ def research_loop(*, agent, splits, edges, spec, state: ResearchState, budget: B
                     record_public_thoughts("code", usage, it_no, "code")
                 except Exception as e:
                     stats["infra_events"] += 1
-                    rec("event", {"run_id": run_id, "iteration": it_no,
-                                  "what": "coder_error", "attempt": attempt,
-                                  "error_type": type(e).__name__, "error": str(e)[:600]})
+                    failed_usage = failed_call_usage(code_usage_start)
+                    body = {"run_id": run_id, "iteration": it_no,
+                            "what": "coder_error", "attempt": attempt,
+                            "error_type": type(e).__name__, "error": str(e)[:600]}
+                    if failed_usage:
+                        body["llm_call"] = {
+                            k: failed_usage.get(k) for k in
+                            ("role", "backend", "model", "seconds", "retries",
+                             "usage_known", "input_tokens", "output_tokens",
+                             "thinking_tokens", "total_tokens", "request_id",
+                             "error_type", "stop_reason")
+                            if failed_usage.get(k) is not None
+                        }
+                    rec("event", body)
                     say(f"       coder failed: {type(e).__name__}: {str(e)[:160]}")
+                    # The ledger already knew the call failed, but the agent's own state did
+                    # not. Feed the failure through the same refused-experiment path used by
+                    # static validation so the next planner sees it and does not spend
+                    # another tournament on the identical infrastructure ceiling.
+                    error_ctx = {
+                        "phase": "code_generation",
+                        "error_type": type(e).__name__,
+                        "error": str(e)[:900],
+                    }
                     break
 
                 # What the coder actually sent. A repair prompt otherwise showed the
@@ -1189,6 +1230,7 @@ def research_loop(*, agent, splits, edges, spec, state: ResearchState, budget: B
 
             # ---- reflect on whatever happened, including a failure
             if exp is not None:
+                reflect_usage_start = len(getattr(agent, "usage", []))
                 try:
                     with it.stage("reflect"):
                         refl, usage = agent.reflect(
@@ -1210,9 +1252,20 @@ def research_loop(*, agent, splits, edges, spec, state: ResearchState, budget: B
                         say(f"       beliefs updated: {touched}")
                 except Exception as e:
                     stats["infra_events"] += 1
-                    rec("event", {"run_id": run_id, "iteration": it_no,
-                                  "what": "reflector_error",
-                                  "error_type": type(e).__name__, "error": str(e)[:600]})
+                    failed_usage = failed_call_usage(reflect_usage_start)
+                    body = {"run_id": run_id, "iteration": it_no,
+                            "what": "reflector_error",
+                            "error_type": type(e).__name__, "error": str(e)[:600]}
+                    if failed_usage:
+                        body["llm_call"] = {
+                            k: failed_usage.get(k) for k in
+                            ("role", "backend", "model", "seconds", "retries",
+                             "usage_known", "input_tokens", "output_tokens",
+                             "thinking_tokens", "total_tokens", "request_id",
+                             "error_type", "stop_reason")
+                            if failed_usage.get(k) is not None
+                        }
+                    rec("event", body)
 
                 # ---- promote on the SIGNED number, never on the reflection's advice
                 if exp.signed and exp.delta_vs_champion is not None \
@@ -1229,26 +1282,20 @@ def research_loop(*, agent, splits, edges, spec, state: ResearchState, budget: B
                         exp.outcome = "rejected"
                     state.add(exp)
 
-                rec("event", {"run_id": run_id, "iteration": it_no,
-                              "what": "iteration_result",
-                              "tree": exp.tree, "outcome": exp.outcome,
-                              "signed_primary": (exp.signed or {}).get(
-                                  "metrics", {}).get("primary"),
-                              "train_primary": exp.train_primary,
-                              "dev_primary": exp.dev_primary, "gap": exp.gap,
-                              "expected_magnitude": exp.expected_magnitude,
-                              "delta_vs_champion": exp.delta_vs_champion,
-                              "repairs": exp.repairs,
-                              "lane": exp.lane,
-                              "tournament_size": exp.tournament_size,
-                              "considered_in_lane": exp.considered_in_lane,
-                              "beliefs_after": state.beliefs_for_prompt(6),
-                              "reflection": _trim(exp.reflection),
-                              # record_now(), not cost.to_record(): this entry is written
-                              # INSIDE the iteration context, where __exit__ has not yet
-                              # filled wall_seconds. Using the raw record wrote 0.0 into the
-                              # ledger while the stages beneath it totalled ~54 s.
-                              "cost": it.record_now()})
+                result_body = bounded_iteration_result_record(
+                    run_id=run_id, exp=exp, state=state, cost=it.record_now())
+                ok, entry = rec("event", result_body)
+                if not ok:
+                    # The compact summary is presentation evidence, not the score itself,
+                    # but silently dropping it made the console look as if the iteration
+                    # never finished. Record a small, guaranteed-bounded infrastructure
+                    # event and keep the signed score intact.
+                    stats["infra_events"] += 1
+                    rec("event", {"run_id": run_id, "iteration": it_no,
+                                  "what": "iteration_result_record_error",
+                                  "tree": exp.tree, "outcome": exp.outcome,
+                                  "error": str(entry)[:600]})
+                    say(f"       note: iteration summary record refused ({entry})")
 
             # ---- convergence, on the organisers' rule
             best_window.append(state.champion_primary)
@@ -1297,6 +1344,104 @@ def _trim(d, limit: int = 900):
     return {k: (v[:limit] if isinstance(v, str) else v) for k, v in d.items()}
 
 
+def bounded_iteration_result_record(*, run_id: str, exp: Experiment,
+                                    state: ResearchState, cost: dict) -> dict:
+    """Build a useful iteration summary that always fits the scorer's record cap.
+
+    The full reflection and beliefs remain in ``state.json``. The signed summary keeps the
+    conclusion fields a judge needs, omits the reflection's duplicated ``belief_updates``,
+    and bounds the latest four material beliefs.
+    """
+    reflection = exp.reflection if isinstance(exp.reflection, dict) else {}
+    reflection_keys = (
+        "what_happened", "mechanism_supported", "why", "recommendation",
+        "prediction_comment", "remaining_uncertainty", "next_question",
+    )
+    bounded_reflection = {
+        key: (value[:600] if isinstance(value, str) else value)
+        for key in reflection_keys
+        if (value := reflection.get(key)) is not None
+    }
+    bounded_beliefs = []
+    for belief in state.beliefs_for_prompt(4):
+        bounded_beliefs.append({
+            "mechanism": str(belief.get("mechanism") or "")[:180],
+            "lane": str(belief.get("lane") or "")[:40],
+            "belief": str(belief.get("belief") or "")[:360],
+            "confidence": belief.get("confidence"),
+            "supporting_iterations": list(belief.get("supporting_iterations") or [])[-8:],
+            "contradicting_iterations":
+                list(belief.get("contradicting_iterations") or [])[-8:],
+            "affected_files": [str(x)[:60]
+                               for x in (belief.get("affected_files") or [])[:8]],
+            "effect_range": list(belief.get("effect_range") or [])[:2],
+            "unresolved": str(belief.get("unresolved") or "")[:180],
+            "retry_only_if": str(belief.get("retry_only_if") or "")[:180],
+            "last_updated_iteration": belief.get("last_updated_iteration"),
+        })
+    return {
+        "run_id": run_id, "iteration": exp.iteration,
+        "what": "iteration_result", "tree": exp.tree, "outcome": exp.outcome,
+        "signed_primary": (exp.signed or {}).get("metrics", {}).get("primary"),
+        "train_primary": exp.train_primary, "dev_primary": exp.dev_primary,
+        "gap": exp.gap, "expected_magnitude": exp.expected_magnitude,
+        "delta_vs_champion": exp.delta_vs_champion, "repairs": exp.repairs,
+        "lane": exp.lane, "tournament_size": exp.tournament_size,
+        "considered_in_lane": exp.considered_in_lane,
+        "beliefs_after": bounded_beliefs,
+        "reflection": bounded_reflection,
+        # record_now(), not cost.to_record(): this entry is written inside the iteration
+        # context, before __exit__ fills wall_seconds.
+        "cost": cost,
+    }
+
+
+def provenance_for_seed_files(profile: str, files: dict[str, str]) -> dict:
+    """Describe what an artifact seed actually contains, not just its base profile.
+
+    A continuation may use ``--seed-tree`` with source written by an earlier agent run.
+    Reusing the profile's provenance in that case would falsely say that pairwise or an
+    alternative architecture was absent. Parse the supplied source using the same naming
+    rules as :func:`candidate.profile_provenance` and retain the profile as the contract
+    origin only.
+    """
+    import ast
+
+    def defs(name: str) -> tuple[set[str], set[str]]:
+        source = files.get(name)
+        if source is None:
+            return set(), set()
+        tree = ast.parse(source, filename=name)
+        funcs = {node.name for node in ast.walk(tree)
+                 if isinstance(node, ast.FunctionDef)}
+        classes = {node.name for node in ast.walk(tree)
+                   if isinstance(node, ast.ClassDef)}
+        return funcs, classes
+
+    model_funcs, model_classes = defs("model.py")
+    train_funcs, _ = defs("train.py")
+    all_funcs = model_funcs | train_funcs
+    pairwise_names = {"step_pairwise", "pairs_within_user", "step_bpr",
+                      "build_pair_index", "group_pairs"}
+    baseline_fm = {"__init__", "logits", "predict", "_apply", "step_pointwise",
+                   "state", "load", "sigmoid"}
+    extra_model = sorted(model_funcs - baseline_fm - pairwise_names - {"step_listwise"})
+    extra_classes = sorted(model_classes - {"FM"})
+    base = CAND.profile_provenance(profile)
+    base.update({
+        "provenance_scope": "actual_seed_source",
+        "pairwise_code_present": bool(pairwise_names & all_funcs),
+        "listwise_code_present": "step_listwise" in all_funcs,
+        "alternative_architecture_code_present": bool(extra_model or extra_classes),
+        "model_classes": sorted(model_classes),
+        "extra_model_functions": extra_model,
+        "extra_model_classes": extra_classes,
+        "model_py_functions": sorted(model_funcs),
+        "train_py_functions": sorted(train_funcs),
+    })
+    return base
+
+
 def _experiment_primary(state: ResearchState, tree: str):
     for e in reversed(state.experiments):
         if e.tree == tree and e.signed:
@@ -1315,6 +1460,12 @@ def build_parser() -> argparse.ArgumentParser:
                     default=float(BUD.OFFICIAL_MAX_WALL_SECONDS),
                     help="hard agent wall-clock cap; the organisers' limit is 6 h")
     ap.add_argument("--max-tokens", type=int, default=None)
+    ap.add_argument(
+        "--llm-max-output-tokens", type=int,
+        default=DEFAULT_LLM_MAX_OUTPUT_TOKENS,
+        help="maximum output tokens for one LLM role call. This is separate from "
+             "--max-tokens, which caps the whole run. Raise it for complete multi-file "
+             "architecture replacements.")
     ap.add_argument("--backend", default="gemini",
                     choices=["gemini", "ollama", "groq", "anthropic"],
                     help="same backends as the typed proposer, so the two arms stay "
@@ -1389,11 +1540,20 @@ def build_parser() -> argparse.ArgumentParser:
                          'the seed proposal: starting from anything other than the '
                          'unmodified official baseline is a DISCLOSURE, not a detail, so it '
                          'goes in the signed chain rather than in prose.')
+    ap.add_argument(
+        "--seed-tree", default=None,
+        help="full content-addressed artifact hash to use as the starting candidate. "
+             "This is for explicitly disclosed diagnostic continuations and cannot be "
+             "combined with --seed-config.")
     return ap
 
 
 def main() -> None:
     a = build_parser().parse_args()
+    if not 1_024 <= a.llm_max_output_tokens <= 100_000:
+        raise SystemExit("--llm-max-output-tokens must be between 1,024 and 100,000")
+    if a.seed_tree and a.seed_config:
+        raise SystemExit("--seed-tree and --seed-config are mutually exclusive")
     from agent.research_agent import MIN_TOURNAMENT_SIZE
     if a.research_policy == "tournament":
         if a.tournament_size < MIN_TOURNAMENT_SIZE:
@@ -1416,7 +1576,20 @@ def main() -> None:
                              "the architecture funding floor can be satisfied")
     # ---- optional seed override, validated against the committed config's own keys
     seed_files, seed_note = None, ""
-    if a.seed_config:
+    if a.seed_tree:
+        tree = str(a.seed_tree).strip().lower()
+        if len(tree) != 64 or any(c not in "0123456789abcdef" for c in tree):
+            raise SystemExit("--seed-tree must be a full 64-character sha256")
+        try:
+            AR.verify(tree)
+            seed_files = AR.read(tree)
+            CAND.validate_tree(seed_files, CAND.workspace_for(a.seed_profile))
+        except (AR.ArtifactError, CAND.CandidateError) as exc:
+            raise SystemExit(f"--seed-tree is unavailable or incompatible: {exc}") from None
+        seed_note = (f"artifact tree {tree} from a previous diagnostic run; this "
+                     "continuation does NOT start from the unmodified official baseline")
+        print(f"[research] SEED TREE {tree[:12]} -- {seed_note}")
+    elif a.seed_config:
         try:
             overrides = json.loads(a.seed_config)
         except json.JSONDecodeError as e:
@@ -1497,7 +1670,10 @@ def main() -> None:
         budget={"max_iterations": a.iterations, "max_wall_seconds": a.max_wall_seconds})
 
     ws = CAND.workspace_for(a.seed_profile)
-    provenance = CAND.profile_provenance(a.seed_profile)
+    provenance = (provenance_for_seed_files(a.seed_profile, seed_files)
+                  if seed_files else CAND.profile_provenance(a.seed_profile))
+    if a.seed_tree:
+        provenance["artifact_tree_override"] = str(a.seed_tree).strip().lower()
     if not provenance.get("official_numpy_seed") and not seed_note:
         seed_note = ("accelerated PyTorch reference profile; this is NOT the byte-identical "
                      "official NumPy baseline")
@@ -1519,6 +1695,7 @@ def main() -> None:
     agent = ResearchAgent(backend=a.backend, model=a.model, effort=a.effort,
                           thinking_level=a.thinking_level,
                           thinking_summaries=a.thought_summaries,
+                          max_tokens=a.llm_max_output_tokens,
                           planner_model=a.planner_model, judge_model=a.judge_model,
                           coder_model=a.coder_model, reflector_model=a.reflector_model)
     print(f"[research] policy={a.research_policy} search_mode={a.search_mode}"
@@ -1558,6 +1735,8 @@ def main() -> None:
         "thought_summaries_requested": a.thought_summaries,
         "isolation": a.isolation, "max_iterations": a.iterations,
         "max_wall_seconds": a.max_wall_seconds,
+        "max_tokens": a.max_tokens,
+        "llm_max_output_tokens": a.llm_max_output_tokens,
         "execution_profile": execution_profile.to_dict(),
         "hardware_capabilities": capabilities,
         "contract_sha256": CAND.contract_sha256(ws),
@@ -1569,6 +1748,8 @@ def main() -> None:
         "model_routing": agent.routing(),
         "seed_profile": a.seed_profile,
         "seed_provenance": provenance,
+        "seed_tree_override": (str(a.seed_tree).strip().lower()
+                               if a.seed_tree else None),
         "seed_config_overrides": (json.loads(a.seed_config) if a.seed_config else None),
         "starts_from_official_baseline": (not bool(seed_note)
                                            and provenance.get("official_numpy_seed", False)),

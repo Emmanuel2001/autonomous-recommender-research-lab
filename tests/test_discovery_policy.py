@@ -160,10 +160,53 @@ check("the bounded record retains all eight candidates and the full ranking",
 check("the selected hypothesis remains readable after bounding",
       bool(meta["candidates"][0]["hypothesis"]) and bool(meta["candidates"][0]["mechanism"]))
 
+state_for_summary = RD.ResearchState({"name": "test"}, {})
+for i in range(10):
+    state_for_summary.beliefs[f"mechanism {i} " + "m" * 400] = {
+        "mechanism": f"mechanism {i} " + "m" * 400,
+        "lane": "model_architecture", "belief": "b" * 1600,
+        "confidence": 0.7, "supporting_iterations": list(range(20)),
+        "contradicting_iterations": list(range(20)),
+        "affected_files": ["model.py" * 30] * 20,
+        "effect_range": [-0.01, 0.01], "unresolved": "u" * 1000,
+        "retry_only_if": "r" * 1000, "last_updated_iteration": i,
+    }
+summary_exp = RD.Experiment(
+    iteration=8, tree="a" * 64, parent="b" * 64,
+    hypothesis="large reflection", lane="model_architecture",
+    reflection={key: "x" * 5000 for key in (
+        "what_happened", "mechanism_supported", "why", "recommendation",
+        "prediction_comment", "remaining_uncertainty", "next_question",
+        "belief_updates")})
+summary = RD.bounded_iteration_result_record(
+    run_id="test", exp=summary_exp, state=state_for_summary,
+    cost={"wall_seconds": 1.0, "tokens_total": 10})
+summary_bytes = len(canonical(summary))
+check("maximal iteration summary stays under MAX_RECORD_BYTES",
+      summary_bytes < MAX_RECORD_BYTES, f"{summary_bytes} < {MAX_RECORD_BYTES}")
+check("iteration summary omits duplicated belief updates",
+      "belief_updates" not in summary["reflection"])
+check("iteration summary keeps a bounded useful belief view",
+      0 < len(summary["beliefs_after"]) <= 4)
+
 print("== CLI and console launcher keep discovery opt-in")
 parser = RD.build_parser()
 check("research CLI defaults to the standard search path",
       parser.parse_args([]).search_mode == "standard")
+continuation_args = parser.parse_args([
+    "--llm-max-output-tokens", "64000", "--seed-tree", "0" * 64])
+check("research CLI separates per-call output from the run token cap",
+      continuation_args.llm_max_output_tokens == 64000)
+check("research CLI accepts an explicit continuation artifact",
+      continuation_args.seed_tree == "0" * 64)
+continued_provenance = RD.provenance_for_seed_files("minimal", {
+    "model.py": "class FM:\n    def step_bpr(self):\n        pass\n",
+    "train.py": "def build_pair_index():\n    pass\n",
+})
+check("continuation provenance detects agent-written BPR naming",
+      continued_provenance["pairwise_code_present"] is True)
+check("a BPR method is not mislabelled as a new model architecture",
+      continued_provenance["alternative_architecture_code_present"] is False)
 check("research CLI exposes exactly standard and discovery",
       tuple(next(a for a in parser._actions if a.dest == "search_mode").choices)
       == RD.SEARCH_MODES)

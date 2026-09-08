@@ -184,6 +184,60 @@ def judge_schema() -> dict:
     }
 
 
+def anthropic_judge_schema(candidates: list) -> dict:
+    """A grammar-cheap Claude judge schema with local coverage enforcement.
+
+    Expanding every candidate into a required object property duplicated the eight scoring
+    fields once per candidate.  It worked for six candidates but exceeded Anthropic's
+    internal grammar limit at eight.  Ranking therefore stays an array whose item schema is
+    compiled once.  Cheap enums prevent invented ids, while ``validate_judge`` remains the
+    authority for omissions, duplicates, consecutive ranks and complete coverage.
+    """
+    ids = [str(c["id"]) for c in candidates]
+    arch_ids = [str(c["id"]) for c in candidates
+                if c.get("lane") == "model_architecture"]
+    architecture = {
+        cid: {
+            "type": "object", "additionalProperties": False,
+            "required": ["verdict", "reason"],
+            "properties": {
+                "verdict": {"type": "string", "enum": ["selected", "rejected"]},
+                "reason": {"type": "string"},
+            },
+        }
+        for cid in arch_ids
+    }
+    schema = judge_schema()
+    schema["properties"]["selected_id"] = {"type": "string", "enum": ids}
+    schema["properties"]["ranking"]["items"]["properties"]["id"] = {
+        "type": "string", "enum": ids,
+    }
+    schema["properties"]["architecture_verdicts"] = {
+        "type": "object", "additionalProperties": False,
+        "required": arch_ids, "properties": architecture,
+    }
+    return schema
+
+
+def normalize_anthropic_judge(verdict: dict, candidates: list) -> dict:
+    """Convert keyed architecture verdicts to the shared list-shaped contract."""
+    out = dict(verdict)
+    keyed_ranking = verdict.get("ranking") or {}
+    if isinstance(keyed_ranking, dict):
+        out["ranking"] = [
+            {"id": str(c["id"]), **dict(keyed_ranking[str(c["id"])])}
+            for c in candidates if isinstance(keyed_ranking.get(str(c["id"])), dict)
+        ]
+    keyed_arch = verdict.get("architecture_verdicts") or {}
+    if isinstance(keyed_arch, dict):
+        out["architecture_verdicts"] = [
+            {"candidate_id": str(c["id"]), **dict(keyed_arch[str(c["id"])])}
+            for c in candidates if c.get("lane") == "model_architecture"
+            and isinstance(keyed_arch.get(str(c["id"])), dict)
+        ]
+    return out
+
+
 def _mutable() -> list[str]:
     from research_workspace.contract import MUTABLE_FILES
     return list(MUTABLE_FILES)
@@ -598,6 +652,15 @@ GEMINI_SAFE_KEYWORDS = {"type", "enum", "items", "properties", "required",
                         "additionalProperties", "minLength", "minimum", "maximum",
                         "description"}
 
+#: Claude structured outputs intentionally implement a narrower JSON-Schema dialect:
+#: array minItems may only be 0 or 1, and maxItems, string-length constraints and numeric
+#: constraints are rejected.  Those constraints remain enforced by the driver and candidate
+#: validators; this is only the schema sent across the provider boundary.
+ANTHROPIC_SAFE_KEYWORDS = {
+    "type", "enum", "const", "anyOf", "allOf", "items", "properties", "required",
+    "additionalProperties", "default", "format", "pattern", "minItems",
+}
+
 
 def strip_schema(node, allowed: set):
     """Recursively drop schema keywords a backend has not been shown to accept."""
@@ -612,6 +675,43 @@ def strip_schema(node, allowed: set):
     if isinstance(node, list):
         return [strip_schema(v, allowed) for v in node]
     return node
+
+
+def anthropic_schema(node):
+    """Return the supported Claude structured-output subset of one of our schemas.
+
+    The only supported positive array lower bound is one.  Exact tournament cardinality and
+    every other removed bound are checked again on our side before code, fitting or scoring,
+    so loosening the provider grammar cannot loosen the experiment protocol.
+    """
+    schema = strip_schema(node, ANTHROPIC_SAFE_KEYWORDS)
+
+    def normalize(value):
+        if isinstance(value, dict):
+            return {
+                key: (1 if key == "minItems" and int(child) > 0 else normalize(child))
+                for key, child in value.items()
+            }
+        if isinstance(value, list):
+            return [normalize(child) for child in value]
+        return value
+
+    return normalize(schema)
+
+
+def anthropic_retry_without_fallback(error) -> bool:
+    """Whether a 400 specifically implicates the optional fallback beta.
+
+    Schema and grammar failures are deterministic and must never be paid for twice.  The
+    retry exists only because some accounts or models may reject the optional server-side
+    fallback feature while accepting the otherwise identical Messages request.
+    """
+    msg = str(error).lower()
+    names_fallback = ("fallback" in msg or "server-side-fallback" in msg
+                      or "beta" in msg)
+    names_schema = any(term in msg for term in
+                       ("schema", "grammar", "output_config", "minitems"))
+    return names_fallback and not names_schema
 
 
 class ResearchAgent:
@@ -761,6 +861,7 @@ class ResearchAgent:
             usage["stop_reason"] = u.get("stop_reason")
         else:
             import anthropic
+            schema = anthropic_schema(schema)
             req = dict(
                 model=model, max_tokens=self.max_tokens,
                 system=[{"type": "text", "text": t} for t in sysb],
@@ -769,14 +870,40 @@ class ResearchAgent:
                                "effort": self.effort},
                 betas=["server-side-fallback-2026-07-01"], fallbacks="default",
             )
+
+            def remember_api_failure(exc, first=None):
+                """Keep failed-call telemetry even when the provider returns no usage."""
+                usage["seconds"] = round(time.perf_counter() - t0, 2)
+                usage["error_type"] = type(exc).__name__
+                usage["error"] = str(exc)[:600]
+                usage["usage_known"] = False
+                usage["total_tokens"] = 0
+                request_id = getattr(exc, "request_id", None)
+                if request_id:
+                    usage["request_id"] = request_id
+                if first is not None:
+                    usage["first_error"] = str(first)[:300]
+                    first_request_id = getattr(first, "request_id", None)
+                    if first_request_id:
+                        usage["first_request_id"] = first_request_id
+                self.usage.append(usage)
+
             try:
                 resp = client.beta.messages.create(**req)
-            except anthropic.BadRequestError:
-                # A 400 is never retryable; most often the beta/fallback pair is unavailable
-                # on this account. Retry once without it, then let it raise.
+            except anthropic.BadRequestError as first:
+                if not anthropic_retry_without_fallback(first):
+                    remember_api_failure(first)
+                    raise
                 usage["retries"] += 1
                 req.pop("betas", None); req.pop("fallbacks", None)
-                resp = client.beta.messages.create(**req)
+                try:
+                    resp = client.beta.messages.create(**req)
+                except anthropic.APIError as second:
+                    remember_api_failure(second, first)
+                    raise
+            except anthropic.APIError as exc:
+                remember_api_failure(exc)
+                raise
             u = resp.usage
             usage.update({
                 "input_tokens": getattr(u, "input_tokens", 0),
@@ -786,7 +913,8 @@ class ResearchAgent:
                 "cache_read_input_tokens":
                     getattr(u, "cache_read_input_tokens", 0) or 0,
                 "thinking_tokens": getattr(u, "thinking_tokens", 0) or 0,
-                "stop_reason": getattr(resp, "stop_reason", None)})
+                "stop_reason": getattr(resp, "stop_reason", None),
+                "usage_known": True})
             text = next((b.text for b in resp.content
                          if getattr(b, "type", "") == "text"), "")
 
@@ -827,6 +955,14 @@ class ResearchAgent:
     def judge(self, candidates, state, parent_source, parent_telemetry=None,
               problems=None):
         s, u = judge_prompt(candidates, state, parent_source, parent_telemetry, problems)
+        if self.backend == "anthropic":
+            u += ("\n\nFor this Claude call, `ranking` is an array with exactly one entry "
+                  "for every candidate id. `architecture_verdicts` is keyed only by "
+                  "model_architecture candidate ids, as required by the supplied schema. "
+                  "Keep explanations concise.")
+            verdict, usage = self._ask(
+                "judge", s, u, anthropic_judge_schema(candidates))
+            return normalize_anthropic_judge(verdict, candidates), usage
         return self._ask("judge", s, u, judge_schema())
 
     def code(self, plan, parent_source, state, error=None, attempt=0):

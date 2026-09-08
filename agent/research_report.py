@@ -90,7 +90,7 @@ def extract(entries: list[dict]) -> dict:
     d = {"genesis": {}, "runs": defaultdict(lambda: {
         "start": {}, "end": {}, "proposals": [], "results": [], "failures": [],
         "refusals": [], "duplicates": [], "infra": [], "tournaments": [],
-        "baseline_repro": {}}),
+        "tournament_proposals": [], "baseline_repro": {}}),
         "scores": {}, "confirm_scores": [], "confirmations": [], "protocols": [],
         "entries": len(entries), "max_seq": 0}
     for e in entries:
@@ -130,11 +130,15 @@ def extract(entries: list[dict]) -> dict:
                     r["refusals"].append({**body, "_seq": seq})
                 elif what == "candidate_duplicate":
                     r["duplicates"].append({**body, "_seq": seq})
+                elif what == "tournament_proposed":
+                    r["tournament_proposals"].append({**body, "_seq": seq})
                 elif what == "tournament":
                     r["tournaments"].append({**body, "_seq": seq})
                 elif what == "seed_baseline_reproduction":
                     r["baseline_repro"] = {**body, "_seq": seq}
-                elif what in ("coder_error", "planner_error", "reflector_error"):
+                elif what in ("coder_error", "planner_error", "reflector_error",
+                               "plan_error", "tournament_error", "judge_error",
+                               "code_error", "reflect_error"):
                     r["infra"].append({**body, "_seq": seq})
     d["runs"] = dict(d["runs"])
     return d
@@ -339,6 +343,9 @@ def _sec_tournaments(r: dict) -> str:
     can see breadth of reasoning without mistaking it for breadth of results.
     """
     ts = sorted(r["tournaments"], key=lambda x: x.get("iteration", 0))
+    if not ts:
+        ts = sorted(r.get("tournament_proposals") or [],
+                    key=lambda x: x.get("iteration", 0))
     if not ts:
         return ("<div class=note>No tournament in this run &mdash; it used the "
                 "<span class=mono>single</span> policy, one hypothesis per iteration.</div>")

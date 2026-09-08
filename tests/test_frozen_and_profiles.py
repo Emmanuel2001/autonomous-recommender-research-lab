@@ -18,6 +18,18 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
+def shipped_files():
+    """Return regular files Git would actually ship, excluding local ignored state."""
+    raw = subprocess.check_output(
+        ["git", "ls-files", "-z"], cwd=ROOT
+    ).decode("utf-8")
+    for rel in raw.split("\0"):
+        if not rel:
+            continue
+        path = ROOT / rel
+        if path.is_file() and not path.is_symlink():
+            yield path
+
 R = []
 def check(n, c, extra=""):
     R.append((n, bool(c))); print(f"  {'PASS' if c else 'FAIL'}  {n}{('  '+extra) if extra else ''}")
@@ -231,8 +243,7 @@ SECRET_PAT = [
     (re.compile(r"^[0-9a-f]{64}$"), "bare 64-hex (possible signing key)"),
 ]
 leaks = []
-for p in sorted(ROOT.rglob("*")):
-    if not p.is_file() or p.is_symlink(): continue
+for p in sorted(shipped_files()):
     rel = str(p.relative_to(ROOT))
     if rel.startswith(("runs/", "KuaiRand-Pure")) or p.suffix in (".npy", ".csv", ".npz"):
         continue
@@ -248,9 +259,7 @@ check("no credential-shaped string in the shipped tree", not leaks, str(leaks[:5
 # "scorer.key", so a filename-only test missed exactly the file that matters most -- which
 # `python3 -m core.scorer keygen` would create right here.
 _bad = []
-for q in ROOT.rglob("*"):
-    if not q.is_file() or q.is_symlink():
-        continue
+for q in shipped_files():
     rel = q.relative_to(ROOT)
     if q.name == ".env.example":
         continue

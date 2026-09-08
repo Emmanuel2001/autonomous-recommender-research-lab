@@ -55,7 +55,12 @@ try:
 
     from agent import candidate as CAND
     from agent import research_driver as RD
-    from agent.research_agent import LANES, REQUIRED_LANES, ROLES, ResearchAgent
+    from agent.research_agent import (LANES, REQUIRED_LANES, ROLES, ResearchAgent,
+                                     anthropic_judge_schema, anthropic_schema,
+                                     anthropic_retry_without_fallback,
+                                     code_schema, judge_schema,
+                                     normalize_anthropic_judge, reflect_schema,
+                                     tournament_schema)
     from agent.research_state import ResearchState
     from core.official_data import load_for_strategy
     from core.task import get as get_task
@@ -63,6 +68,70 @@ try:
     splits, edges = load_for_strategy()
     spec = get_task("kuairand_pure")
     WS = CAND.workspace_for("inherited")
+
+    # Anthropic compiles structured outputs from a deliberately restricted JSON-Schema
+    # dialect.  Provider transport constraints must be normalized without deleting the
+    # structural guarantees, while the adversarial cases below prove the driver still
+    # enforces the removed cardinality constraints before code or fitting.
+    def schema_keys(value):
+        if isinstance(value, dict):
+            return set(value) | set().union(*(schema_keys(v) for v in value.values()))
+        if isinstance(value, list):
+            return set().union(*(schema_keys(v) for v in value))
+        return set()
+
+    anthropic_schemas = [anthropic_schema(s) for s in
+                         (tournament_schema(6), judge_schema(), code_schema(),
+                          reflect_schema())]
+    unsupported = {"maxItems", "minLength", "maxLength", "minimum", "maximum",
+                   "multipleOf"}
+    check("Anthropic schemas omit unsupported bounds",
+          all(not (schema_keys(s) & unsupported) for s in anthropic_schemas))
+    check("Anthropic schemas normalize positive minItems to one",
+          anthropic_schemas[0]["properties"]["candidates"]["minItems"] == 1)
+    check("Anthropic schemas retain object structure and required fields",
+          anthropic_schemas[0]["additionalProperties"] is False
+          and anthropic_schemas[0]["required"] == ["candidates"]
+          and "lane" in anthropic_schemas[0]["properties"]["candidates"]
+                                  ["items"]["properties"])
+    check("Anthropic grammar errors are not blindly retried",
+          not anthropic_retry_without_fallback(
+              "The compiled grammar is too large; simplify your schemas"))
+    check("Anthropic fallback-feature errors get one compatibility retry",
+          anthropic_retry_without_fallback(
+              "server-side-fallback beta is unavailable for this model"))
+    planner_wire = anthropic_schema(tournament_schema(8))
+    planner_item = planner_wire["properties"]["candidates"]["items"]
+    check("Anthropic tournament keeps candidates as ordinary objects",
+          planner_item["type"] == "object"
+          and "lane" in planner_item["properties"])
+
+    keyed_candidates = [
+        {"id": "F1", "lane": "feature_preprocessing"},
+        {"id": "M1", "lane": "model_architecture"},
+    ]
+    keyed = anthropic_judge_schema(keyed_candidates)
+    check("Anthropic judge ranking compiles one array item instead of one object per id",
+          keyed["properties"]["ranking"]["type"] == "array"
+          and keyed["properties"]["ranking"]["items"]["properties"]["id"]["enum"]
+          == ["F1", "M1"])
+    check("Anthropic judge schema permits verdicts only for architecture candidates",
+          keyed["properties"]["architecture_verdicts"]["required"] == ["M1"]
+          and set(keyed["properties"]["architecture_verdicts"]["properties"]) == {"M1"})
+    score = {"rank": 1, "score_evidence": 1.0, "score_expected_impact": 1.0,
+             "score_novelty": 1.0, "score_information_value": 1.0,
+             "score_cpu_feasibility": 1.0, "score_implementation_risk": 1.0}
+    normalized = normalize_anthropic_judge({
+        "selected_id": "M1", "ranking": [
+            {"id": "F1", **{**score, "rank": 2}}, {"id": "M1", **score}],
+        "why_selected": "test", "architecture_verdicts": {
+            "M1": {"verdict": "selected", "reason": "test reason"}},
+        "exploit_or_explore": "explore",
+    }, keyed_candidates)
+    check("Anthropic judge wire shape normalizes to the shared ledger contract",
+          [r["id"] for r in normalized["ranking"]] == ["F1", "M1"]
+          and normalized["architecture_verdicts"] == [{
+              "candidate_id": "M1", "verdict": "selected", "reason": "test reason"}])
 
     seed = dict(CAND.seed_tree(WS))
     cfg = json.loads(seed["config.json"]); cfg.update(epochs=1, patience=1)
@@ -215,12 +284,17 @@ try:
     print(f"\n  [timing] {time.perf_counter()-t0:.0f}s  stats {json.dumps(st)}\n")
 
     entries = [json.loads(l) for l in LEDGER_PATH.read_text().splitlines() if l.strip()]
+    proposed = [e for e in entries
+                if (e["payload"].get("body") or {}).get("what")
+                == "tournament_proposed"]
     tourns = [e for e in entries
               if (e["payload"].get("body") or {}).get("what") == "tournament"]
     props = [e for e in entries if e["payload"].get("kind") == "proposal"]
     scores_ = [e for e in entries if "metrics" in e["payload"]]
 
     # 1 -- the tournament happened, spans every lane, and includes the required ones ------
+    check("every planner tournament is signed before judging", len(proposed) == 3,
+          str(len(proposed)))
     check("a tournament ran for every iteration", len(tourns) == 3, str(len(tourns)))
     cov = tourns[0]["payload"]["body"]["coverage"]
     check("every research lane is represented",
@@ -256,10 +330,12 @@ try:
     ok_order = True
     for t in tourns:
         it_no = t["payload"]["body"]["iteration"]
+        tp = [e for e in proposed if e["payload"]["body"].get("iteration") == it_no]
         pr = [e for e in props if e["payload"]["body"].get("iteration") == it_no]
-        if not pr or min(x["seq"] for x in pr) <= t["seq"]:
+        if (not tp or tp[0]["seq"] >= t["seq"] or not pr
+                or min(x["seq"] for x in pr) <= t["seq"]):
             ok_order = False
-    check("every tournament precedes its own proposal in the chain", ok_order)
+    check("planner set precedes judge decision and candidate proposal", ok_order)
     check("every proposal precedes the score it predicts",
           all(min(p["seq"] for p in props
                   if p["payload"]["body"]["tree"] == s_["payload"]["config_hash"])
@@ -416,6 +492,13 @@ try:
         def judge(self, candidates, state, parent_source, parent_telemetry=None,
                   problems=None):
             self.judge_calls += 1
+            if self.kind == "judge_transport":
+                self.usage.append({
+                    "role": "judge", "backend": "anthropic", "model": "test-opus",
+                    "seconds": 1.25, "retries": 0, "usage_known": False,
+                    "total_tokens": 0, "request_id": "req_test",
+                    "error_type": "BadRequestError", "error": "compiled grammar"})
+                raise RuntimeError("compiled grammar")
             if problems is not None:
                 self.saw_problems = problems
             mend = self.repair_on_retry and self.judge_calls > 1
@@ -459,9 +542,28 @@ try:
 
     print("\n  -- adversarial cases, repair DISABLED (must abort before coding) --")
     for kind in ("no_arch", "no_sampling", "one_lane_x6", "too_few",
-                 "bad_ranking", "no_arch_verdict"):
+                 "bad_ranking", "no_arch_verdict", "judge_transport"):
         ag, o, stt, ents, rt = run_adversarial(kind, False, kind)
         st2 = o["stats"]
+        if kind == "judge_transport":
+            proposed_error = [e for e in ents
+                              if (e["payload"].get("body") or {}).get("what")
+                              == "tournament_proposed"]
+            judge_error = [e for e in ents
+                           if (e["payload"].get("body") or {}).get("what")
+                           == "judge_error"]
+            check("[judge_transport] planner result survives the judge failure",
+                  len(proposed_error) == 1, str(len(proposed_error)))
+            check("[judge_transport] failure names the actual judge stage",
+                  len(judge_error) == 1, str(len(judge_error)))
+            call = ((judge_error[0]["payload"]["body"].get("llm_call") or {})
+                    if judge_error else {})
+            check("[judge_transport] failed-call telemetry reaches the ledger",
+                  call.get("request_id") == "req_test"
+                  and call.get("usage_known") is False, str(call))
+            check("[judge_transport] NO candidate was coded or evaluated",
+                  ag.code_calls == 0 and st2["evaluated"] == 0, str(st2))
+            continue
         aborted = st2["coverage_aborts"] + st2["judge_aborts"] >= 1
         abandon = [e for e in ents
                    if (e["payload"].get("body") or {}).get("what") == "iteration_abandoned"]

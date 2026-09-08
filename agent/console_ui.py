@@ -301,8 +301,8 @@ def digest(entries: list[dict], run_name: str = "") -> dict:
     plausible-looking zero.
     """
     d: dict = {"name": run_name, "start": {}, "end": {}, "scores": [], "tournaments": [],
-               "proposals": [], "iterations": [], "seed": {}, "entries": len(entries),
-               "max_seq": None, "summaries": []}
+               "tournament_proposals": [], "proposals": [], "iterations": [],
+               "seed": {}, "entries": len(entries), "max_seq": None, "summaries": []}
     for e in entries:
         p = e.get("payload") or {}
         b = p.get("body") or {}
@@ -322,6 +322,8 @@ def digest(entries: list[dict], run_name: str = "") -> dict:
                                 "flags": p.get("flags") or []})
         elif kind == "proposal":
             d["proposals"].append({"seq": e.get("seq"), **b})
+        elif what == "tournament_proposed":
+            d["tournament_proposals"].append({"seq": e.get("seq"), **b})
         elif what == "tournament":
             d["tournaments"].append({"seq": e.get("seq"), **b})
         elif what == "iteration_result":
@@ -574,11 +576,13 @@ def _cand_cards(t: dict) -> str:
 
 
 def view_live(d: dict) -> str:
-    if not d["iterations"] and not d["tournaments"]:
+    if (not d["iterations"] and not d["tournaments"]
+            and not d["tournament_proposals"]):
         return ("<div class=empty>No research iteration has been recorded in this ledger "
                 "yet. The timeline appears once a tournament is registered.</div>")
     it = d["iterations"][-1] if d["iterations"] else {}
-    t = d["tournaments"][-1] if d["tournaments"] else {}
+    t = (d["tournaments"][-1] if d["tournaments"] else
+         d["tournament_proposals"][-1] if d["tournament_proposals"] else {})
     prop = next((p for p in d["proposals"] if p.get("iteration") == it.get("iteration")), {})
     refl = it.get("reflection") or {}
 

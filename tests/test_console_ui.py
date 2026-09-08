@@ -64,7 +64,13 @@ def synthetic(with_summary=False, declared=DECLARED):
         ent(4, "event", {"what": "seed_baseline_reproduction",
                          "seed_signed_primary": SEED,
                          "published_baseline_valid": declared}),
-        ent(5, "event", {"what": "tournament", "iteration": 1,
+        ent(5, "event", {"what": "tournament_proposed", "iteration": 1,
+                         "candidates": [{"id": "O1", "lane": "objective_loss",
+                                         "hypothesis": "pairwise"},
+                                        {"id": "M1", "lane": "model_architecture",
+                                         "hypothesis": "dropout"}],
+                         "coverage": {"lane_coverage_ok": True}}),
+        ent(6, "event", {"what": "tournament", "iteration": 1,
                          "candidates": [{"id": "O1", "lane": "objective_loss",
                                          "hypothesis": "pairwise"},
                                         {"id": "M1", "lane": "model_architecture",
@@ -78,13 +84,13 @@ def synthetic(with_summary=False, declared=DECLARED):
                                    "architecture_verdicts": [
                                        {"candidate_id": "M1", "verdict": "rejected",
                                         "reason": "sparse embeddings"}]}}),
-        ent(6, "proposal", {"what": "candidate_proposal", "iteration": 1,
+        ent(7, "proposal", {"what": "candidate_proposal", "iteration": 1,
                             "tree": "b" * 64, "files_changed": ["config.json"],
                             "hypothesis": "pairwise", "expected_magnitude": 0.03,
                             "diff_bytes": 155, "diff_hash": "d" * 64}),
-        ent(7, "score", None, metrics={"primary": CHAMP}, split="valid", tree="b" * 64,
+        ent(8, "score", None, metrics={"primary": CHAMP}, split="valid", tree="b" * 64,
             scores_sha256="t" * 64),
-        ent(8, "event", {"what": "iteration_result", "iteration": 1,
+        ent(9, "event", {"what": "iteration_result", "iteration": 1,
                          "lane": "objective_loss", "outcome": "promoted",
                          "dev_primary": CHAMP, "delta_vs_champion": GAIN_SEED,
                          "gap": 0.0776,
@@ -97,7 +103,7 @@ def synthetic(with_summary=False, declared=DECLARED):
                                                             "mechanism": "pairwise",
                                                             "supports": True,
                                                             "confidence": 0.9}]}}),
-        ent(9, "run_end", {"champion": {"primary": CHAMP}, "termination": "budget",
+        ent(10, "run_end", {"champion": {"primary": CHAMP}, "termination": "budget",
                            "stats": {"evaluated": 1, "promoted": 1},
                            "budget": {"iterations": 1, "max_iterations": 1,
                                       "iteration_wall_seconds": [19.7]},
@@ -115,6 +121,8 @@ def synthetic(with_summary=False, declared=DECLARED):
 
 print("== the two improvement numbers are never conflated")
 d = UI.digest(synthetic())
+check("digest preserves the pre-judge tournament proposal",
+      len(d["tournament_proposals"]) == 1, str(len(d["tournament_proposals"])))
 check("digest computes improvement over SEED",
       abs(d["m"]["gain_vs_seed"] - GAIN_SEED) < 1e-9, str(d["m"]["gain_vs_seed"]))
 check("digest computes improvement over DECLARED baseline separately",

@@ -341,16 +341,8 @@ def candidate_to_plan(cand: dict) -> dict:
     }
 
 
-def bounded_tournament_record(*, cands: list, coverage: dict, verdict: dict,
-                              plan: dict, selection_how: str, search_mode: str,
-                              architecture_required: bool) -> dict:
-    """A complete-enough tournament record that always leaves room under the scorer cap.
-
-    Eight live hypotheses exceeded the 12,288-byte signed-body limit before any candidate
-    could run. The full response already paid for that information, but the audit trail
-    needs the decision, mechanism and ranking -- not unlimited prose. Bounds apply only to
-    the signed presentation record; the chosen plan sent to the coder remains unabridged.
-    """
+def bounded_tournament_candidates(cands: list) -> list[dict]:
+    """Bound candidate prose while preserving the executable research claims."""
     def s(value, n):
         return str(value or "")[:n]
 
@@ -368,6 +360,35 @@ def bounded_tournament_record(*, cands: list, coverage: dict, verdict: dict,
             "files_to_change": [s(x, 40) for x in (c.get("files_to_change") or [])[:8]],
             "implementation_risk": s(c.get("implementation_risk"), 60),
         })
+    return candidates
+
+
+def bounded_tournament_proposal_record(*, cands: list, coverage: dict,
+                                       search_mode: str,
+                                       architecture_required: bool) -> dict:
+    """The signed candidate set, recorded before the independent judge is called."""
+    return {
+        "coverage": coverage,
+        "search_mode": search_mode,
+        "architecture_selection_required": architecture_required,
+        "candidates": bounded_tournament_candidates(cands),
+        "record_note": ("candidate prose is bounded for the signed 12,288-byte record; "
+                        "the full in-memory candidates continue unchanged to the judge"),
+    }
+
+
+def bounded_tournament_record(*, cands: list, coverage: dict, verdict: dict,
+                              plan: dict, selection_how: str, search_mode: str,
+                              architecture_required: bool) -> dict:
+    """A complete-enough tournament decision that stays under the scorer body cap.
+
+    The candidate set has already been signed in ``tournament_proposed``. This record adds
+    the judge's ranking and selected plan before candidate source exists or executes.
+    """
+    def s(value, n):
+        return str(value or "")[:n]
+
+    candidates = bounded_tournament_candidates(cands)
     ranking = []
     for r in (verdict.get("ranking") or [])[:12]:
         if not isinstance(r, dict):
@@ -728,6 +749,9 @@ def research_loop(*, agent, splits, edges, spec, state: ResearchState, budget: B
 
             # ---- plan: one hypothesis, or a tournament judged down to one
             tourn_meta = None
+            tournament_proposal_seq = None
+            failure_stage = "plan"
+            usage_before_planning = len(getattr(agent, "usage", []))
             try:
                 if policy == "tournament":
                     # ---- tournament, with a BOUNDED repair call on incomplete coverage.
@@ -737,6 +761,7 @@ def research_loop(*, agent, splits, edges, spec, state: ResearchState, budget: B
                     # report claim breadth the run did not have.
                     cands, cov, deficiency = [], {}, None
                     for cattempt in range(max_coverage_repairs + 1):
+                        failure_stage = "tournament"
                         with it.stage("tournament"):
                             traw, usage = agent.tournament(
                                 state.for_prompt(), parent_files,
@@ -775,10 +800,32 @@ def research_loop(*, agent, splits, edges, spec, state: ResearchState, budget: B
                             "No candidate was written, fitted or scored.")
                         continue
 
+                    # Preserve the paid planner result before asking the independent judge.
+                    # A judge transport failure must not make a generated tournament vanish
+                    # from the signed evidence or be misdiagnosed as a planner failure.
+                    proposed = bounded_tournament_proposal_record(
+                        cands=cands, coverage=cov, search_mode=search_mode,
+                        architecture_required=architecture_due)
+                    ok, tournament_proposal_seq = rec("event", {
+                        "run_id": run_id, "iteration": it_no,
+                        "what": "tournament_proposed", "policy": policy,
+                        "tournament_size": tournament_size, **proposed})
+                    if not ok:
+                        stats["unregistered_aborts"] += 1
+                        say(f"       ABANDONED: the tournament proposal could not be "
+                            f"recorded ({tournament_proposal_seq}). Nothing runs unrecorded.")
+                        continue
+                    arch = [c for c in cands if c["lane"] == "model_architecture"]
+                    stats["candidates_considered"] += len(cands)
+                    stats["architecture_considered"] += len(arch)
+                    say(f"       tournament proposal recorded at seq "
+                        f"{tournament_proposal_seq}")
+
                     # ---- judge, also bounded. An invalid ranking or a missing architecture
                     # verdict is refused the same way, for the same reason.
                     verdict, jproblems = None, None
                     for jattempt in range(max_coverage_repairs + 1):
+                        failure_stage = "judge"
                         with it.stage("judge"):
                             verdict, usage = agent.judge(
                                 cands, state.for_prompt(), parent_files,
@@ -812,10 +859,7 @@ def research_loop(*, agent, splits, edges, spec, state: ResearchState, budget: B
                         continue
                     chosen, how = select_from_tournament(cands, verdict)
                     plan = candidate_to_plan(chosen)
-                    arch = [c for c in cands if c["lane"] == "model_architecture"]
                     stats["tournaments"] += 1
-                    stats["candidates_considered"] += len(cands)
-                    stats["architecture_considered"] += len(arch)
                     if plan.get("lane") == "model_architecture":
                         stats["architecture_selected"] += 1
                     if not cov["lane_coverage_ok"]:
@@ -831,6 +875,7 @@ def research_loop(*, agent, splits, edges, spec, state: ResearchState, budget: B
                         f"architecture) -> chose {plan.get('_candidate_id')} "
                         f"[{plan.get('lane')}] ({how})")
                 else:
+                    failure_stage = "plan"
                     with it.stage("plan"):
                         plan, usage = agent.plan(state.for_prompt(), parent_files,
                                                  telem_cache.get(parent_tree))
@@ -840,10 +885,25 @@ def research_loop(*, agent, splits, edges, spec, state: ResearchState, budget: B
                     record_public_thoughts("plan", usage, it_no, "plan")
             except Exception as e:
                 stats["infra_events"] += 1
-                rec("event", {"run_id": run_id, "iteration": it_no,
-                              "what": "planner_error", "policy": policy,
-                              "error_type": type(e).__name__, "error": str(e)[:600]})
-                say(f"       planner failed: {type(e).__name__}: {str(e)[:160]}")
+                failure = {"run_id": run_id, "iteration": it_no,
+                           "what": f"{failure_stage}_error", "stage": failure_stage,
+                           "policy": policy, "error_type": type(e).__name__,
+                           "error": str(e)[:600]}
+                if tournament_proposal_seq is not None:
+                    failure["tournament_proposal_seq"] = tournament_proposal_seq
+                current_usage = getattr(agent, "usage", [])[usage_before_planning:]
+                failed_usage = next((u for u in reversed(current_usage)
+                                     if u.get("error")), None)
+                if failed_usage:
+                    failure["llm_call"] = {
+                        k: failed_usage.get(k) for k in
+                        ("role", "backend", "model", "seconds", "retries",
+                         "usage_known", "total_tokens", "request_id", "error_type")
+                        if failed_usage.get(k) is not None
+                    }
+                rec("event", failure)
+                say(f"       {failure_stage} failed: {type(e).__name__}: "
+                    f"{str(e)[:160]}")
                 continue
             stats["planned"] += 1
 
@@ -855,7 +915,7 @@ def research_loop(*, agent, splits, edges, spec, state: ResearchState, budget: B
                 ok, entry = rec("event", {
                     "run_id": run_id, "iteration": it_no, "what": "tournament",
                     "policy": policy, "tournament_size": tournament_size,
-                    **tourn_meta})
+                    "proposal_seq": tournament_proposal_seq, **tourn_meta})
                 if not ok:
                     stats["unregistered_aborts"] += 1
                     say(f"       ABANDONED: the tournament could not be recorded "

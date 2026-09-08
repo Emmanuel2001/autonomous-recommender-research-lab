@@ -133,6 +133,16 @@ def research_events(entries: list[dict], after: int = -1) -> list[dict]:
                 "model routing": body.get("model_routing"),
                 "execution": body.get("execution_profile"),
                 "hardware": body.get("hardware_capabilities")}
+        elif what == "tournament_proposed":
+            cs = body.get("candidates") or []
+            event.update(origin="LLM hypotheses · harness-registered",
+                         title=f"Tournament proposed · {len(cs)} candidates",
+                         summary="Candidate set signed before the independent judge call")
+            event["detail"] = {
+                "candidates": [{k: c.get(k) for k in
+                                ("id", "lane", "hypothesis", "files_to_change")}
+                               for c in cs],
+                "coverage": body.get("coverage")}
         elif what == "tournament":
             cs = body.get("candidates") or []
             chosen = body.get("selected_id")

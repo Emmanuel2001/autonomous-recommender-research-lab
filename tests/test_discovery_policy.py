@@ -188,6 +188,28 @@ check("iteration summary omits duplicated belief updates",
       "belief_updates" not in summary["reflection"])
 check("iteration summary keeps a bounded useful belief view",
       0 < len(summary["beliefs_after"]) <= 4)
+run_end = RD.bounded_run_end_record({
+    "run_id": "test", "termination": "budget",
+    "stats": {"planned": 8, "evaluated": 8},
+    "budget": {"tokens_total": 999999, "stage_seconds": {"code": 1200.0}},
+    "champion": {"tree": "a" * 64, "primary": 0.604},
+    "usage_by_role": {role: {"calls": 8, "models": ["claude-opus-5"],
+                              "total_tokens": 100000}
+                      for role in ("plan", "judge", "code", "reflect")},
+    "lane_stats": {"by_lane": {lane: {"considered": 8, "selected": 2,
+                                         "executed": 1, "promoted": 0}
+                                for lane in lanes}},
+    "beliefs": state_for_summary.beliefs,
+    "hardware_capabilities": {"cpu": {"available": True},
+                              "mps": {"available": False},
+                              "cuda": {"available": False}},
+    "manual_interventions": [],
+})
+run_end_bytes = len(canonical(run_end))
+check("maximal run-end summary stays under MAX_RECORD_BYTES",
+      run_end_bytes < MAX_RECORD_BYTES, f"{run_end_bytes} < {MAX_RECORD_BYTES}")
+check("run-end summary discloses omitted beliefs",
+      run_end["beliefs_omitted"] == 6 and len(run_end["beliefs"]) == 4)
 
 print("== CLI and console launcher keep discovery opt-in")
 parser = RD.build_parser()

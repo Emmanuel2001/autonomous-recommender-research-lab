@@ -1396,6 +1396,47 @@ def bounded_iteration_result_record(*, run_id: str, exp: Experiment,
     }
 
 
+def bounded_belief_map(beliefs: dict, limit: int = 4) -> tuple[dict, int]:
+    """Return the newest useful beliefs in a shape small enough for signed summaries."""
+    ordered = sorted(
+        (b for b in beliefs.values() if isinstance(b, dict)),
+        key=lambda b: int(b.get("last_updated_iteration") or -1), reverse=True)
+    out = {}
+    for index, belief in enumerate(ordered[:limit]):
+        mechanism = str(belief.get("mechanism") or f"belief_{index}")[:220]
+        key = mechanism if mechanism not in out else f"{mechanism[:200]} [{index}]"
+        out[key] = {
+            "mechanism": mechanism,
+            "lane": str(belief.get("lane") or "")[:40],
+            "belief": str(belief.get("belief") or "")[:420],
+            "confidence": belief.get("confidence"),
+            "supporting_iterations": list(
+                belief.get("supporting_iterations") or [])[-8:],
+            "contradicting_iterations": list(
+                belief.get("contradicting_iterations") or [])[-8:],
+            "affected_files": [str(x)[:60]
+                               for x in (belief.get("affected_files") or [])[:8]],
+            "effect_range": list(belief.get("effect_range") or [])[:2],
+            "unresolved": str(belief.get("unresolved") or "")[:180],
+            "retry_only_if": str(belief.get("retry_only_if") or "")[:180],
+            "last_updated_iteration": belief.get("last_updated_iteration"),
+        }
+    return out, max(0, len(ordered) - len(out))
+
+
+def bounded_run_end_record(body: dict) -> dict:
+    """Bound the derived run summary without dropping its completion record.
+
+    Full state remains in ``state.json`` and experiment-level beliefs remain in signed
+    iteration records. A run_end is an index over that evidence, so the newest four beliefs
+    are enough here and the omitted count is explicit.
+    """
+    result = dict(body)
+    result["beliefs"], result["beliefs_omitted"] = bounded_belief_map(
+        body.get("beliefs") or {})
+    return result
+
+
 def provenance_for_seed_files(profile: str, files: dict[str, str]) -> dict:
     """Describe what an artifact seed actually contains, not just its base profile.
 
@@ -1774,20 +1815,30 @@ def main() -> None:
     finally:
         state.save(state_path)
 
-    rec("run_end", {"run_id": run_id, "termination": out["converged"] or "budget",
-                    "stats": out["stats"], "budget": out["budget"],
-                    "champion": state.champion,
-                    "usage_by_role": agent.usage_by_role(),
-                    "lane_stats": state.lane_stats(),
-                    "beliefs": state.beliefs,
-                    "seed_profile": a.seed_profile,
-                    "research_policy": a.research_policy,
-                    "search_mode": a.search_mode,
-                    "evidence_class": evidence_class,
-                    "submittable": official_evidence,
-                    "execution_profile": execution_profile.to_dict(),
-                    "hardware_capabilities": capabilities,
-                    "manual_interventions": state.manual_interventions})
+    end_body = bounded_run_end_record({
+        "run_id": run_id, "termination": out["converged"] or "budget",
+        "stats": out["stats"], "budget": out["budget"],
+        "champion": state.champion,
+        "usage_by_role": agent.usage_by_role(),
+        "lane_stats": state.lane_stats(),
+        "beliefs": state.beliefs,
+        "seed_profile": a.seed_profile,
+        "research_policy": a.research_policy,
+        "search_mode": a.search_mode,
+        "evidence_class": evidence_class,
+        "submittable": official_evidence,
+        "execution_profile": execution_profile.to_dict(),
+        "hardware_capabilities": capabilities,
+        "manual_interventions": state.manual_interventions,
+    })
+    ok, end_error = rec("run_end", end_body)
+    if not ok:
+        # A missing run_end makes a completed run look active forever in every report. Fail
+        # loudly after preserving state so the operator can append an explicitly labelled
+        # recovery record. Never silently claim the run closed.
+        raise SystemExit(f"could not record run_end: {end_error}. State was saved at "
+                         f"{state_path}; append a labelled recovery summary before using "
+                         f"this ledger in a report.")
     state.save(state_path)
 
     print("\n[research] ================= run complete =================")

@@ -1,0 +1,29 @@
+{
+  "loss": "bpr",
+  "fields": [
+    "user_id",
+    "video_id",
+    "author_id",
+    "tab",
+    "dur_bucket"
+  ],
+  "auto_fields": true,
+  "max_new_fields": 10,
+  "max_field_cardinality": 2000,
+  "cont_bins": 16,
+  "exclude_fields": [],
+  "k": 16,
+  "lr": 0.001,
+  "l2": 1e-06,
+  "mlp_hidden": [64, 32],
+  "mlp_lr": 0.001,
+  "mlp_wd": 1e-05,
+  "grad_check": true,
+  "epochs": 60,
+  "batch": 8192,
+  "patience": 4,
+  "seed": 0,
+  "train_curve_every": 1,
+  "pairs_per_pos": 1,
+  "max_seconds": 420
+}

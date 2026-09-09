@@ -62,8 +62,18 @@ prior.update_beliefs(negative, [{
     "mechanism": "pairwise ordering", "lane": "objective_loss",
     "belief": "mixed evidence", "llm_confidence": 0.5, "supports": False,
 }])
-check("contradictory evidence revises the grade",
-      prior.beliefs["pairwise ordering"]["evidence_grade"] == "contradicted")
+# This assertion used to require "contradicted", which is the defect
+# anthropic_contract_gate2 exposed: one contradicting iteration outranked everything, so a
+# single-seed negative could bury the submitted BPR champion's 20/20 seed confirmation of
+# the same mechanism by a different implementation. A grade now reports STRENGTH and
+# `belief_direction` reports which way it points.
+check("one supporting and one contradicting result grade as mixed, not contradicted",
+      prior.beliefs["pairwise ordering"]["evidence_grade"] == "mixed",
+      prior.beliefs["pairwise ordering"]["evidence_grade"])
+check("the conflict is visible as a direction rather than a verdict",
+      ResearchState.belief_direction(prior.beliefs["pairwise ordering"]) == "conflicting")
+check("'contradicted' is no longer a grade this project can emit",
+      "contradicted" not in __import__("core.evidence", fromlist=["x"]).GRADES)
 
 imported = ResearchState(task("new"))
 summary = imported.import_memory(prior, mode="import", source="prior/state.json")

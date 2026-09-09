@@ -127,6 +127,9 @@ class ResearchState:
         #: Reflections imported from a compatible earlier run. Kept separate so a report
         #: never mistakes them for experiments executed in this run.
         self.imported_reflections: list[dict] = []
+        #: Implementation-level signed observations, the unit evidence is actually about.
+        #: Beliefs are the reflector's prose ABOUT these; grades are computed FROM them.
+        self.observations: list[dict] = []
         self.memory_import: dict | None = None
         self.diagnostics: dict = {}
         #: idea -> list of failures, so the same mistake is visible before it repeats
@@ -241,18 +244,47 @@ class ResearchState:
 
     @staticmethod
     def evidence_grade(belief: dict) -> str:
-        """Categorical strength from recorded outcomes, never the LLM's confidence."""
+        """Categorical strength from recorded outcomes, never the LLM's confidence.
+
+        WHY "contradicted" IS GONE. It used to be returned whenever ANY iteration
+        contradicted the mechanism, which let one single-seed negative outrank a
+        twenty-seed confirmation of the same mechanism by a different implementation --
+        exactly what `anthropic_contract_gate2` did to the submitted BPR champion. A grade
+        describes the STRENGTH of the evidence; whether it points for or against is
+        `direction`, recorded separately. Disagreement is `mixed`, and the reader is sent
+        to the implementations rather than handed a verdict.
+        """
+        from core import evidence as EV
+        observations = belief.get("observations") or []
+        if observations:
+            return EV.grade([EV.Observation(**{k: v for k, v in o.items()
+                                               if k in EV.Observation.__dataclass_fields__})
+                             for o in observations])
+        supporting = set(belief.get("supporting_iterations") or [])
+        contradicting = set(belief.get("contradicting_iterations") or [])
+        if supporting and contradicting:
+            return "mixed"
         if belief.get("seed_confirmation"):
             return "seed_confirmed"
-        contradicting = len(set(belief.get("contradicting_iterations") or []))
-        supporting = len(set(belief.get("supporting_iterations") or []))
-        if contradicting:
-            return "contradicted"
-        if supporting >= 2:
+        seen = supporting | contradicting
+        if len(seen) >= 2:
             return "replicated"
-        if supporting == 1:
+        if len(seen) == 1:
             return "single_signed_result"
         return "unreplicated"
+
+    @staticmethod
+    def belief_direction(belief: dict) -> str:
+        """Which way the evidence points. Kept apart from the GRADE, which is strength."""
+        supporting = set(belief.get("supporting_iterations") or [])
+        contradicting = set(belief.get("contradicting_iterations") or [])
+        if supporting and contradicting:
+            return "conflicting"
+        if contradicting:
+            return "against"
+        if supporting:
+            return "for"
+        return "none"
 
     @staticmethod
     def compatibility(task: dict) -> dict:
@@ -300,10 +332,79 @@ class ResearchState:
         if mode == "continue":
             self.seen_trees.update(prior.seen_trees)
             self.failures = deepcopy(prior.failures)
+        obs_imported, obs_skipped = self.import_evidence(
+            prior.observations, source=source,
+            confirmations=getattr(prior, "confirmations", None))
         self.memory_import = {"mode": mode, "source": str(source),
                               "beliefs_imported": imported,
-                              "beliefs_skipped_unscoped": skipped}
+                              "beliefs_skipped_unscoped": skipped,
+                              "observations_imported": obs_imported,
+                              "observations_skipped": obs_skipped}
         return dict(self.memory_import)
+
+    def import_evidence(self, observations, *, source: str,
+                        confirmations=None) -> tuple[int, int]:
+        """Ingest implementation-level signed observations from a compatible lineage.
+
+        Callers gate compatibility first (see `import_memory`). What this adds is the
+        per-observation scope check and provenance: an observation whose own recorded
+        scope does not match this run's contracts is skipped even when the run-level
+        headers agreed, because an observation may have travelled through an earlier
+        import. Provenance -- the originating ledger, sequence and run -- is preserved
+        rather than rewritten, so a reader can always reach the signed record.
+        """
+        current = self.compatibility(self.task)
+        imported = skipped = 0
+        for raw in (observations or []):
+            record = deepcopy(dict(raw))
+            scope = (record.get("provenance") or {}).get("scope") or {}
+            if scope:
+                same = all(scope.get(k) == current.get(k) for k in
+                           ("dataset_fingerprint", "data_contract_sha256",
+                            "workspace_contract_sha256") if scope.get(k) is not None)
+                if not same:
+                    skipped += 1
+                    continue
+            prov = dict(record.get("provenance") or {})
+            prov.setdefault("origin", str(source))
+            prov["imported"] = True
+            record["provenance"] = prov
+            if confirmations is not None and not record.get("seed_confirmation"):
+                best = confirmations.best_for(record.get("tree") or "")
+                if best:
+                    record["seed_confirmation"] = best
+            self.note_observation(record)
+            imported += 1
+        return imported, skipped
+
+    def note_observation(self, obs) -> dict:
+        """Record one implementation-level signed observation. Never overwrites another.
+
+        Two implementations of one mechanism are two observations, which is the whole
+        point: the mechanism's grade is computed across them rather than being overwritten
+        by whichever ran last.
+        """
+        record = obs.to_record() if hasattr(obs, "to_record") else dict(obs)
+        self.observations = [o for o in self.observations
+                             if not (o.get("tree") == record.get("tree")
+                                     and o.get("mechanism") == record.get("mechanism"))]
+        self.observations.append(record)
+        return record
+
+    def mechanism_evidence(self, limit: int = 6) -> list[dict]:
+        """Reconciled, conflicts-first evidence blocks for the planner.
+
+        This is a RENDERING of signed observations, not a new belief. It is what
+        requirement 5 asks for: a planner that would otherwise read one run's reflection as
+        settled sees both sides and which implementation carries the strongest evidence.
+        """
+        from core import evidence as EV
+        fields = EV.Observation.__dataclass_fields__
+        obs = [EV.Observation(**{k: v for k, v in o.items() if k in fields})
+               for o in self.observations]
+        if not obs:
+            return []
+        return EV.planner_view(EV.index_by_mechanism(obs), limit=limit)
 
     def beliefs_for_prompt(self, n: int = 12) -> list[dict]:
         """Most-recently-updated beliefs first, bounded."""
@@ -433,6 +534,10 @@ class ResearchState:
             # Structured conclusions the next tournament reasons over, and the lane
             # distribution so it can see which directions it has been neglecting.
             "beliefs": self.beliefs_for_prompt(),
+            # Reconciled signed evidence, conflicts first. A belief is one reflector's
+            # reading of one run; this is every implementation of a mechanism weighed
+            # together, so a single-seed negative cannot present itself as settled.
+            "mechanism_evidence": self.mechanism_evidence(),
             "lane_stats": self.lane_stats(),
             "failure_registry": {
                 k: v[-PROMPT_FAILURES:] for k, v in sorted(self.failures.items())},
@@ -447,6 +552,7 @@ class ResearchState:
         return {"task": self.task, "budget": self.budget, "champion": self.champion,
                 "beliefs": self.beliefs,
                 "imported_reflections": self.imported_reflections,
+                "observations": self.observations,
                 "memory_import": self.memory_import,
                 "experiments": [e.to_record() for e in self.experiments],
                 "diagnostics": self.diagnostics, "failures": self.failures,
@@ -478,6 +584,10 @@ class ResearchState:
             belief["llm_confidence_note"] = "reflector-authored and uncalibrated"
             belief["evidence_grade"] = s.evidence_grade(belief)
         s.imported_reflections = d.get("imported_reflections", [])
+        # Absent on every state.json written before observations existed. Defaulting to []
+        # keeps every recorded run loadable; `Experiment(**e)` above has no such tolerance,
+        # which is why nothing here adds a required field.
+        s.observations = d.get("observations", []) or []
         s.memory_import = d.get("memory_import")
         s.diagnostics = d.get("diagnostics", {})
         s.failures = d.get("failures", {})

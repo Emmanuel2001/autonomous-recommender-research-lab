@@ -58,6 +58,7 @@ from agent.research_state import Experiment, ResearchState   # noqa: E402
 from core import artifacts as AR               # noqa: E402
 from core import budgets as BUD                # noqa: E402
 from core import data_contract as DATA_CONTRACT  # noqa: E402
+from core import evidence as EVID  # noqa: E402
 from core import execution as EXEC             # noqa: E402
 # OFFICIAL_TEST is deliberately NOT imported here. The code-first driver has no legitimate
 # use for any test figure, and not importing it makes that checkable by grep rather than by
@@ -1405,6 +1406,37 @@ def research_loop(*, agent, splits, edges, spec, state: ResearchState, budget: B
                     # Structured beliefs, keyed by MECHANISM, so the next tournament reasons
                     # over conclusions rather than re-reading prose. The supporting and
                     # contradicting iteration lists come from the signed outcome.
+                    # Record the IMPLEMENTATION-level observation before the reflector's
+                    # prose. The grade a future run reads is computed across every
+                    # implementation of a mechanism; a belief is one reading of one run.
+                    try:
+                        parent_cfg = json.loads((parent_files or {}).get("config.json")
+                                                or "{}")
+                    except (ValueError, TypeError):
+                        parent_cfg = {}
+                    child_cfg = static.get("config") or {}
+                    state.note_observation(EVID.Observation(
+                        mechanism=EVID.mechanism_key(parent_cfg, child_cfg, changed),
+                        tree=tree, parent_tree=parent_tree, changed_files=list(changed),
+                        config=child_cfg,
+                        config_delta=EVID.config_delta(parent_cfg, child_cfg),
+                        feature_fields=list(child_cfg.get("fields") or []),
+                        model_family=str(plan.get("model_family") or ""),
+                        signed_metrics=dict(spay.get("metrics") or {}),
+                        delta=exp.delta_vs_parent
+                        if exp.delta_vs_parent is not None else exp.delta_vs_champion,
+                        delta_versus=("parent" if exp.delta_vs_parent is not None
+                                      else "champion"),
+                        procedure_claims={
+                            "sampling_and_optimizer": str(
+                                plan.get("mechanism") or "")[:400],
+                            "note": "LLM-authored; the harness does not verify procedure",
+                        },
+                        provenance={"run_id": run_id, "iteration": it_no,
+                                    "scope": state.compatibility(state.task)},
+                        mechanism_label=str(plan.get("mechanism")
+                                            or plan.get("hypothesis") or "")[:200],
+                    ))
                     touched = state.update_beliefs(exp, refl.get("belief_updates"))
                     if touched:
                         stats["beliefs_updated"] += len(touched)

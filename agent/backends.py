@@ -139,7 +139,8 @@ class GeminiBackend:
         self.key, self.model, self.thinking = api_key, model, thinking_level
         self.thinking_summaries = bool(thinking_summaries)
 
-    def complete_json(self, system: str, user: str, schema: dict) -> tuple[dict, dict]:
+    def complete_json(self, system: str, user: str, schema: dict,
+                      max_output_tokens: int | None = None) -> tuple[dict, dict]:
         gen: dict = {}
         if self.thinking:
             gen["thinking_level"] = self.thinking
@@ -147,6 +148,8 @@ class GeminiBackend:
             # Interactions API public reasoning summary. This is intentionally not the
             # encrypted thought signature and does not expose private chain-of-thought.
             gen["thinking_summaries"] = "auto"
+        if max_output_tokens is not None:
+            gen["max_output_tokens"] = int(max_output_tokens)
         body = {
             "model": self.model,
             "system_instruction": system,
@@ -211,7 +214,8 @@ class OpenAICompatBackend:
         self.url = base_url.rstrip("/") + "/chat/completions"
         self.model, self.key = model, api_key
 
-    def complete_json(self, system: str, user: str, schema: dict) -> tuple[dict, dict]:
+    def complete_json(self, system: str, user: str, schema: dict,
+                      max_output_tokens: int | None = None) -> tuple[dict, dict]:
         body = {
             "model": self.model,
             "messages": [{"role": "system", "content": system},
@@ -221,6 +225,8 @@ class OpenAICompatBackend:
                                                 "schema": schema}},
             "stream": False,
         }
+        if max_output_tokens is not None:
+            body["max_tokens"] = int(max_output_tokens)
         h = {"Authorization": f"Bearer {self.key}"} if self.key else {}
         resp = _post(self.url, body, h)
         return resp, extract_usage(resp, self.name)

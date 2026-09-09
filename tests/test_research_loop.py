@@ -96,7 +96,11 @@ try:
             base = {"stage": "training", "parent": "champion",
                     "evidence": f"scripted step {n}", "risk": "none",
                     "success_criteria": "dev primary improves",
-                    "expected_direction": "increase", "files_to_change": ["config.json"]}
+                    "expected_direction": "increase",
+                    # Every scripted attempt below now changes both declared files. This
+                    # keeps the fixture honest under the realization guard while still
+                    # exercising syntax and runtime repair after that guard passes.
+                    "files_to_change": ["config.json", "train.py"]}
             if n == 1:
                 base.update(hypothesis="one epoch is undertrained; train for three",
                             mechanism="more gradient steps from an undertrained start",
@@ -116,9 +120,19 @@ try:
             if error is not None:
                 self.saw_errors.append(error)
             if n == 1:
-                files = BROKEN_SYNTAX if error is None else cfg_edit(epochs=3, patience=3)
+                files = (cfg_edit(epochs=3, patience=3) + BROKEN_SYNTAX
+                         if error is None else
+                         cfg_edit(epochs=3, patience=3) + [{
+                             "path": "train.py",
+                             "content": seed["train.py"] +
+                                        "\n# scripted repair: epochs are configured\n"}])
             elif n == 2:
-                files = WRONG_SHAPE if error is None else cfg_edit(lr=1e-9, epochs=1)
+                files = (cfg_edit(lr=1e-9, epochs=1) + WRONG_SHAPE
+                         if error is None else
+                         cfg_edit(lr=1e-9, epochs=1) + [{
+                             "path": "train.py",
+                             "content": seed["train.py"] +
+                                        "\n# scripted repair: deliberately tiny lr\n"}])
             else:
                 # The SEED tree: differs from the champion (1 epoch vs 3) but has already
                 # been evaluated, so this exercises dedup rather than the

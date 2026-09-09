@@ -424,22 +424,27 @@ def _sec_beliefs(r: dict) -> str:
             f"<tr><td class=wrap>{esc(b.get('mechanism'))}</td>"
             f"<td>{esc(b.get('lane'))}</td>"
             f"<td class=wrap>{esc(str(b.get('belief'))[:120])}</td>"
-            f"<td class=n>{_num(b.get('confidence'), '.2f')}</td>"
+            f"<td class=n>{_num(b.get('llm_confidence', b.get('confidence')), '.2f')}"
+            f"<br><span class=note>uncalibrated</span></td>"
+            f"<td>{esc(b.get('evidence_grade') or 'legacy/ungraded')}</td>"
             f"<td class=n>{esc(b.get('supporting_iterations'))}</td>"
             f"<td class=n>{esc(b.get('contradicting_iterations'))}</td>"
             f"<td class=n>{_num(lo, '+.4f')} .. {_num(hi, '+.4f')}</td>"
             f"<td class=wrap>{esc(str(b.get('retry_only_if'))[:110])}</td>"
             f"<td class=n>{esc(b.get('last_updated_iteration'))}</td></tr>")
-    return (_table(["mechanism", "lane", "belief now", "conf", "supported by",
+    return (_table(["mechanism", "lane", "belief now", "LLM confidence", "evidence",
+                    "supported by",
                     "contradicted by", "effect range", "retry only if", "updated"],
-                   rows, "none", 9)
+                   rows, "none", 10)
             + "<div class=note>These are what the NEXT tournament reasons over. A belief that "
               "a mechanism is unhelpful is as useful as one that it works: it removes a "
               "direction from consideration instead of letting it be re-proposed.<br><br>"
               "<b>These are interpretations, not measurements.</b> The delta behind each one "
-              "is scorer-signed, but the belief, the confidence, and whether a result counts "
+              "is scorer-signed, but the belief, LLM confidence, and whether a result counts "
               "as supporting or contradicting are all written by the reflector &mdash; an LLM "
-              "forming an opinion about a signed number. Read them as the agent's reasoning, "
+              "forming an opinion about a signed number. LLM confidence is uncalibrated; the "
+              "categorical evidence grade is computed from recorded outcomes. Read beliefs "
+              "as the agent's reasoning, "
               "not as evidence. The signed numbers are in the iterations table above.</div>")
 
 

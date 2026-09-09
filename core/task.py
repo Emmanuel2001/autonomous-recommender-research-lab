@@ -96,6 +96,9 @@ class TaskSpec:
     convergence: dict = field(default_factory=dict)
     #: facts handed to the agent as seed knowledge, including measured dead ends
     knowledge: dict = field(default_factory=dict)
+    #: Whether this task requires a user-conditioned prediction pathway. Declared by the
+    #: problem owner, never guessed from a column name or metric.
+    personalization: dict = field(default_factory=lambda: {"required": False})
 
     def score(self, rows, scores) -> dict:
         """Apply the metric. The one place a number is produced from a score vector."""
@@ -154,8 +157,35 @@ def kuairand_pure() -> TaskSpec:
                      "source": "organisers (baseline_scores.json)",
                      "note": "epsilon is ~2.5 sigma of the published seed std; it is a "
                              "keep-searching threshold, NOT a significance test"},
-        knowledge={"dead_ends": dict(OA.DEAD_ENDS),
-                   "unexplored": OA.__doc__.split("Encouraged")[-1].strip()},
+        knowledge={
+            "dead_ends": dict(OA.DEAD_ENDS),
+            "unexplored": OA.__doc__.split("Encouraged")[-1].strip(),
+            "time_col": "date", "item_col": "video_id",
+            "loaded_sources": [
+                "log_standard_4_08_to_4_21_pure.csv",
+                "log_standard_4_22_to_5_08_pure.csv",
+                "video_features_basic_pure.csv: author_id only",
+            ],
+            "excluded_sources": [
+                {"source": "user_features_pure.csv",
+                 "reason": "present in the dataset directory but not joined by the "
+                           "current loader"},
+                {"source": "video_features_basic_pure.csv: remaining columns",
+                 "reason": "the current loader joins author_id only"},
+                {"source": "video_features_statistic_pure.csv",
+                 "reason": "period aggregates cover the full logging window, including "
+                           "held-out dates; a naive join leaks future information"},
+                {"source": "log_random_4_22_to_5_08_pure.csv",
+                 "reason": "different exposure policy and excluded from the declared "
+                           "official task loader"},
+            ],
+        },
+        personalization={
+            "required": True,
+            "user_role": "user_id",
+            "require_interaction_not_user_bias_only": True,
+            "non_personalized_allowed_only_as_declared_ablation": True,
+        },
     )
 
 

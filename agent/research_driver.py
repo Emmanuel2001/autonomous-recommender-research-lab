@@ -53,9 +53,11 @@ sys.path.insert(0, str(ROOT))
 import numpy as np  # noqa: E402
 
 from agent import candidate as CAND            # noqa: E402
+from agent.proposer import ProposerTruncated   # noqa: E402
 from agent.research_state import Experiment, ResearchState   # noqa: E402
 from core import artifacts as AR               # noqa: E402
 from core import budgets as BUD                # noqa: E402
+from core import data_contract as DATA_CONTRACT  # noqa: E402
 from core import execution as EXEC             # noqa: E402
 # OFFICIAL_TEST is deliberately NOT imported here. The code-first driver has no legitimate
 # use for any test figure, and not importing it makes that checkable by grep rather than by
@@ -70,7 +72,8 @@ MAX_REPAIRS = 3
 #: ``--max-tokens``, which caps the whole research run. Large architecture replacements can
 #: legitimately need more than 32k output tokens even when the total run remains below its
 #: operator-approved budget.
-DEFAULT_LLM_MAX_OUTPUT_TOKENS = 32_000
+DEFAULT_LLM_MAX_OUTPUT_TOKENS = 64_000
+MAX_LLM_MAX_OUTPUT_TOKENS = 128_000
 
 #: Leave room in a 12,288-byte record for everything that is NOT the diff.
 INLINE_DIFF_BUDGET = 6000
@@ -130,7 +133,8 @@ def require_compatible_search_ledger(path: str | Path, search_mode: str) -> None
             f"separate scorer processes, sockets and ledgers.")
 
 
-def validate_tournament(out: dict, size: int, *, discovery: bool = False) -> tuple[list, dict]:
+def validate_tournament(out: dict, size: int, *, discovery: bool = False,
+                        data_contract: dict | None = None) -> tuple[list, dict]:
     """Normalise a tournament and decide whether its coverage is ACCEPTABLE.
 
     Coverage is now enforced, not merely reported. The rules, in the order a reader would
@@ -186,6 +190,9 @@ def validate_tournament(out: dict, size: int, *, discovery: bool = False) -> tup
     if unknown_lane:
         problems.append(
             f"candidates {unknown_lane} declare a lane outside {list(LANES)}")
+    if data_contract:
+        for candidate in cands:
+            problems.extend(plan_contract_problems(candidate, data_contract))
     if discovery:
         for c in (c for c in cands if c["lane"] == "model_architecture"):
             cid = c["id"]
@@ -343,8 +350,50 @@ def candidate_to_plan(cand: dict) -> dict:
         "leakage_risk": cand.get("leakage_risk", ""),
         "model_family": cand.get("model_family", ""),
         "architecture_change": cand.get("architecture_change", ""),
+        "data_columns": cand.get("data_columns") or [],
+        "derived_features": cand.get("derived_features") or [],
+        "personalization": cand.get("personalization", ""),
+        "personalization_pathway": cand.get("personalization_pathway", ""),
         "_candidate_id": cand.get("id"),
     }
+
+
+def realization_problems(plan: dict, changed: list[str]) -> list[str]:
+    """Cheap, auditable checks that the returned patch matches its declaration."""
+    actual = set(map(str, changed or []))
+    declared = set(map(str, plan.get("files_to_change") or []))
+    problems = []
+    missing = sorted(declared - actual)
+    if missing:
+        problems.append(f"declared files_to_change were not changed: {missing}")
+    if plan.get("lane") == "model_architecture" and "model.py" not in actual:
+        problems.append("a model_architecture experiment must actually change model.py")
+    return problems
+
+
+def plan_contract_problems(plan: dict, data_contract: dict) -> list[str]:
+    """Validate explicit data and personalization declarations before coding."""
+    problems = DATA_CONTRACT.candidate_column_problems(plan, data_contract)
+    personalization = data_contract.get("personalization") or {}
+    if personalization.get("required"):
+        cid = str(plan.get("id") or plan.get("_candidate_id") or "candidate")
+        mode = str(plan.get("personalization") or "")
+        pathway = str(plan.get("personalization_pathway") or "").strip()
+        if mode not in ("preserved", "added", "non_personalized_ablation"):
+            problems.append(
+                f"candidate {cid} must declare how personalization is handled for this "
+                f"task")
+        elif mode != "non_personalized_ablation" and len(pathway) < 8:
+            problems.append(
+                f"candidate {cid} must describe its user-conditioned "
+                f"personalization_pathway")
+        elif (mode == "non_personalized_ablation"
+              and not personalization.get(
+                  "non_personalized_allowed_only_as_declared_ablation", False)):
+            problems.append(
+                f"candidate {cid} requests a non-personalized ablation, but the task "
+                f"contract does not allow one")
+    return problems
 
 
 def bounded_tournament_candidates(cands: list) -> list[dict]:
@@ -364,6 +413,9 @@ def bounded_tournament_candidates(cands: list) -> list[dict]:
             "model_family": s(c.get("model_family"), 50),
             "architecture_change": s(c.get("architecture_change"), 100),
             "files_to_change": [s(x, 40) for x in (c.get("files_to_change") or [])[:8]],
+            "data_columns": [s(x, 40) for x in (c.get("data_columns") or [])[:16]],
+            "personalization": s(c.get("personalization"), 32),
+            "personalization_pathway": s(c.get("personalization_pathway"), 100),
             "implementation_risk": s(c.get("implementation_risk"), 60),
         })
     return candidates
@@ -731,6 +783,9 @@ def research_loop(*, agent, splits, edges, spec, state: ResearchState, budget: B
             until_check = max(0, (conv_n + 1) - len(best_window))
             state.budget = {
                 "max_iterations": budget.max_iterations,
+                "mode": budget.mode,
+                "max_tokens": budget.max_tokens,
+                "tokens_remaining": rem.get("tokens"),
                 "iterations_done": budget.iterations_done,
                 "evaluations_remaining": rem["iterations"],
                 "wall_seconds_remaining": round(rem["wall_seconds"]),
@@ -795,7 +850,8 @@ def research_loop(*, agent, splits, edges, spec, state: ResearchState, budget: B
                         record_public_thoughts("plan", usage, it_no, "tournament")
                         cands, cov = validate_tournament(
                             traw, tournament_size,
-                            discovery=(search_mode == "discovery"))
+                            discovery=(search_mode == "discovery"),
+                            data_contract=(state.task.get("data") or None))
                         if cov["lane_coverage_ok"]:
                             break
                         stats["lane_coverage_violations"] += 1
@@ -927,6 +983,22 @@ def research_loop(*, agent, splits, edges, spec, state: ResearchState, budget: B
                 continue
             stats["planned"] += 1
 
+            # A single-policy plan does not pass through validate_tournament. Apply the
+            # same authoritative data and personalization checks here before a paid coder
+            # call. Tournament plans have already passed, but checking again protects
+            # future selection code from bypassing the contract.
+            contract_problems = plan_contract_problems(
+                plan, state.task.get("data") or {}) if state.task.get("data") else []
+            if contract_problems:
+                stats["coverage_aborts"] += 1
+                rec("event", {"run_id": run_id, "iteration": it_no,
+                              "what": "iteration_abandoned",
+                              "reason": "plan conflicts with authoritative data contract",
+                              "problems": contract_problems,
+                              "coded": False, "fitted": False, "scored": False})
+                say(f"       ABANDONED before coding: {contract_problems[:2]}")
+                continue
+
             # ---- record the tournament BEFORE any candidate code exists or runs, so the
             # set considered and the judge's reasoning cannot be reconstructed after the
             # result is known. A refused record aborts the iteration: an unrecorded
@@ -993,6 +1065,11 @@ def research_loop(*, agent, splits, edges, spec, state: ResearchState, budget: B
                         "error_type": type(e).__name__,
                         "error": str(e)[:900],
                     }
+                    if isinstance(e, ProposerTruncated) and attempt < max_repairs:
+                        it.note_repair(); stats["repaired"] += 1
+                        say(f"       retrying truncated code generation at reduced effort "
+                            f"(repair {attempt + 1}/{max_repairs})")
+                        continue
                     break
 
                 # What the coder actually sent. A repair prompt otherwise showed the
@@ -1005,6 +1082,11 @@ def research_loop(*, agent, splits, edges, spec, state: ResearchState, budget: B
                 # ---- apply + validate. A refused tree costs nothing and is recorded.
                 try:
                     child, changed = merge_tree(parent_files, out.get("files"))
+                    mismatches = realization_problems(plan, changed)
+                    if mismatches:
+                        raise CAND.CandidateError(
+                            "candidate does not realize its declared experiment: "
+                            + "; ".join(mismatches))
                     static = CAND.validate_tree(child, ws)
                 except (CAND.CandidateError, AR.ArtifactError) as e:
                     stats["refused"] += 1
@@ -1368,7 +1450,8 @@ def bounded_iteration_result_record(*, run_id: str, exp: Experiment,
             "mechanism": str(belief.get("mechanism") or "")[:180],
             "lane": str(belief.get("lane") or "")[:40],
             "belief": str(belief.get("belief") or "")[:360],
-            "confidence": belief.get("confidence"),
+            "llm_confidence": belief.get("llm_confidence", belief.get("confidence")),
+            "evidence_grade": belief.get("evidence_grade"),
             "supporting_iterations": list(belief.get("supporting_iterations") or [])[-8:],
             "contradicting_iterations":
                 list(belief.get("contradicting_iterations") or [])[-8:],
@@ -1409,7 +1492,8 @@ def bounded_belief_map(beliefs: dict, limit: int = 4) -> tuple[dict, int]:
             "mechanism": mechanism,
             "lane": str(belief.get("lane") or "")[:40],
             "belief": str(belief.get("belief") or "")[:420],
-            "confidence": belief.get("confidence"),
+            "llm_confidence": belief.get("llm_confidence", belief.get("confidence")),
+            "evidence_grade": belief.get("evidence_grade"),
             "supporting_iterations": list(
                 belief.get("supporting_iterations") or [])[-8:],
             "contradicting_iterations": list(
@@ -1432,8 +1516,139 @@ def bounded_run_end_record(body: dict) -> dict:
     are enough here and the omitted count is explicit.
     """
     result = dict(body)
+
+    # Run-end is a compact index, not a second state file. Keep measured scalar counters
+    # and bounded timing aggregates, but discard arbitrary nested diagnostics that belong
+    # in state.json or their original signed event. This is what prevents a future field
+    # from silently making completion unrecordable again.
+    stats = result.get("stats") or {}
+    if isinstance(stats, dict):
+        result["stats"] = {
+            str(key)[:80]: (value[:240] if isinstance(value, str) else value)
+            for key, value in stats.items()
+            if value is None or isinstance(value, (bool, int, float, str))
+        }
+    budget = result.get("budget") or {}
+    if isinstance(budget, dict):
+        scalar_budget_keys = (
+            "iterations", "max_iterations", "wall_seconds", "max_wall_seconds",
+            "wall_hours", "tokens_in", "tokens_out", "tokens_thinking",
+            "tokens_total", "tokens_total_from_iterations", "max_tokens", "mode",
+            "call_preflights", "call_preflight_refusals", "iteration_wall_mean",
+            "iteration_wall_max", "repairs", "started_epoch",
+        )
+        compact_budget = {key: budget.get(key) for key in scalar_budget_keys
+                          if budget.get(key) is not None}
+        compact_budget["iteration_wall_seconds"] = [
+            value for value in (budget.get("iteration_wall_seconds") or [])[-50:]
+            if isinstance(value, (int, float))]
+        compact_budget["stage_seconds"] = {
+            str(key)[:60]: value
+            for key, value in list((budget.get("stage_seconds") or {}).items())[:20]
+            if isinstance(value, (int, float))}
+        compact_budget["remaining"] = {
+            str(key)[:60]: value for key, value in
+            (budget.get("remaining") or {}).items()
+            if value is None or isinstance(value, (bool, int, float, str))}
+        result["budget"] = compact_budget
+
     result["beliefs"], result["beliefs_omitted"] = bounded_belief_map(
         body.get("beliefs") or {})
+    champion = dict(result.get("champion") or {})
+    if isinstance(champion.get("hypothesis"), str):
+        champion["hypothesis"] = champion["hypothesis"][:320]
+    result["champion"] = champion
+    result["manual_interventions"] = [
+        {k: (v[:240] if isinstance(v, str) else v) for k, v in x.items()}
+        for x in (result.get("manual_interventions") or [])[-8:]
+        if isinstance(x, dict)]
+
+    # The report needs aggregates, not arbitrary provider payloads or long capability
+    # reasons. Full details remain in state.json and per-call evidence.
+    roles = {}
+    for role, raw in (result.get("usage_by_role") or {}).items():
+        if not isinstance(raw, dict):
+            continue
+        roles[str(role)[:24]] = {
+            key: ([str(x)[:100] for x in raw.get(key, [])[:4]]
+                  if key == "models" and isinstance(raw.get(key), list)
+                  else raw.get(key))
+            for key in ("calls", "input_tokens", "output_tokens", "thinking_tokens",
+                        "total_tokens", "seconds", "retries", "refusals",
+                        "truncations", "models")
+            if raw.get(key) is not None}
+        result["usage_by_role"] = roles
+
+    lane_stats = result.get("lane_stats") or {}
+    if isinstance(lane_stats, dict):
+        by_lane = {}
+        for lane, raw in list((lane_stats.get("by_lane") or {}).items())[:12]:
+            if not isinstance(raw, dict):
+                continue
+            by_lane[str(lane)[:40]] = {
+                key: raw.get(key) for key in (
+                    "considered", "selected", "executed", "promoted", "rejected",
+                    "failed", "refused", "repairs", "mean_signed_delta")
+                if raw.get(key) is not None}
+        result["lane_stats"] = {
+            "by_lane": by_lane,
+            "file_edits": {
+                str(key)[:80]: value for key, value in
+                list((lane_stats.get("file_edits") or {}).items())[:12]
+                if isinstance(value, int)},
+            **{key: lane_stats.get(key) for key in (
+                "model_py_edits", "train_py_edits", "features_py_edits",
+                "config_json_edits") if lane_stats.get(key) is not None},
+        }
+
+    capabilities = result.get("hardware_capabilities") or {}
+    if isinstance(capabilities, dict):
+        compact_hardware = {k: capabilities.get(k) for k in
+                            ("platform", "python", "torch_available", "torch_version")
+                            if capabilities.get(k) is not None}
+        for device in ("cpu", "mps", "cuda"):
+            raw = capabilities.get(device)
+            if isinstance(raw, dict):
+                compact_hardware[device] = {
+                    key: (value[:120] if isinstance(value, str) else value)
+                    for key, value in raw.items()
+                    if key in ("available", "name", "reason", "memory_bytes")}
+        result["hardware_capabilities"] = compact_hardware
+
+    from core.ledger import canonical
+    from core.scorer import MAX_RECORD_BYTES
+    if len(canonical(result)) > MAX_RECORD_BYTES:
+        # Preserve completion, totals and the winning artifact. The omitted detail is
+        # explicitly named instead of allowing the scorer to refuse run_end altogether.
+        beliefs, omitted = bounded_belief_map(body.get("beliefs") or {}, limit=2)
+        result["beliefs"] = beliefs
+        result["beliefs_omitted"] = omitted
+        result["hardware_capabilities"] = {
+            key: {"available": value.get("available")}
+            for key, value in (result.get("hardware_capabilities") or {}).items()
+            if key in ("cpu", "mps", "cuda") and isinstance(value, dict)}
+        result["run_end_compaction"] = [
+            "hardware capability detail", "older beliefs"]
+    if len(canonical(result)) > MAX_RECORD_BYTES:
+        result["lane_stats"] = {
+            "model_py_edits": (result.get("lane_stats") or {}).get("model_py_edits"),
+            "train_py_edits": (result.get("lane_stats") or {}).get("train_py_edits"),
+            "features_py_edits": (result.get("lane_stats") or {}).get("features_py_edits"),
+            "config_json_edits": (result.get("lane_stats") or {}).get("config_json_edits"),
+        }
+        result["run_end_compaction"].append("per-lane detail")
+    if len(canonical(result)) > MAX_RECORD_BYTES:
+        # Last-resort bounded index. This still closes the run and points to the complete
+        # state, while keeping all scored totals and the champion identity.
+        keep = ("run_id", "termination", "stats", "budget", "champion",
+                "usage_by_role", "beliefs", "beliefs_omitted", "seed_profile",
+                "research_policy", "search_mode", "evidence_class", "submittable",
+                "execution_profile", "manual_interventions")
+        result = {k: result.get(k) for k in keep if k in result}
+        result["run_end_compaction"] = ["hardware detail", "lane detail",
+                                         "nonessential run metadata"]
+    if len(canonical(result)) > MAX_RECORD_BYTES:
+        raise ValueError("bounded run_end still exceeds the scorer record cap")
     return result
 
 
@@ -1502,6 +1717,12 @@ def build_parser() -> argparse.ArgumentParser:
                     help="hard agent wall-clock cap; the organisers' limit is 6 h")
     ap.add_argument("--max-tokens", type=int, default=None)
     ap.add_argument(
+        "--budget-mode", default=None, choices=["fixed", "maximize", "open"],
+        help="fixed stops at --max-tokens; maximize is diagnostic search that keeps "
+             "working until that allowance is exhausted; open has no token ceiling but "
+             "still obeys iteration and wall-clock caps. If omitted, fixed is inferred "
+             "when --max-tokens is present, otherwise open.")
+    ap.add_argument(
         "--llm-max-output-tokens", type=int,
         default=DEFAULT_LLM_MAX_OUTPUT_TOKENS,
         help="maximum output tokens for one LLM role call. This is separate from "
@@ -1538,6 +1759,14 @@ def build_parser() -> argparse.ArgumentParser:
     ap.add_argument("--task-spec", default=None,
                     help="confirmed portable JSON task specification; overrides --task")
     ap.add_argument("--run-name", default=None)
+    ap.add_argument("--memory", default="fresh",
+                    choices=["fresh", "continue", "import"],
+                    help="fresh starts without prior conclusions; continue imports "
+                         "compatible conclusions, failures and dedup history from the "
+                         "lineage named by --memory-from; import carries only compatible "
+                         "beliefs and reflections")
+    ap.add_argument("--memory-from", default=None,
+                    help="state.json from a previous versioned, compatible research run")
     ap.add_argument("--research-policy", default="tournament",
                     choices=["tournament", "single"],
                     help="'tournament' (default) proposes several competing hypotheses "
@@ -1591,10 +1820,18 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main() -> None:
     a = build_parser().parse_args()
-    if not 1_024 <= a.llm_max_output_tokens <= 100_000:
-        raise SystemExit("--llm-max-output-tokens must be between 1,024 and 100,000")
+    if not 1_024 <= a.llm_max_output_tokens <= MAX_LLM_MAX_OUTPUT_TOKENS:
+        raise SystemExit(
+            f"--llm-max-output-tokens must be between 1,024 and "
+            f"{MAX_LLM_MAX_OUTPUT_TOKENS:,}")
     if a.seed_tree and a.seed_config:
         raise SystemExit("--seed-tree and --seed-config are mutually exclusive")
+    if a.memory == "fresh" and a.memory_from:
+        raise SystemExit("--memory-from requires --memory continue or --memory import")
+    if a.memory != "fresh" and not a.memory_from:
+        raise SystemExit(f"--memory {a.memory} requires --memory-from")
+    if a.memory == "continue" and not a.seed_tree:
+        raise SystemExit("--memory continue requires --seed-tree from the prior champion")
     from agent.research_agent import MIN_TOURNAMENT_SIZE
     if a.research_policy == "tournament":
         if a.tournament_size < MIN_TOURNAMENT_SIZE:
@@ -1615,6 +1852,14 @@ def main() -> None:
         if a.iterations < 3:
             raise SystemExit("--search-mode discovery requires at least 3 iterations so "
                              "the architecture funding floor can be satisfied")
+    budget_mode = a.budget_mode or ("fixed" if a.max_tokens is not None else "open")
+    if budget_mode in ("fixed", "maximize") and a.max_tokens is None:
+        raise SystemExit(f"--budget-mode {budget_mode} requires --max-tokens")
+    if budget_mode == "open" and a.max_tokens is not None:
+        raise SystemExit("--budget-mode open cannot be combined with --max-tokens")
+    if budget_mode == "maximize" and a.convergence != "off":
+        raise SystemExit("--budget-mode maximize requires --convergence off; it is a "
+                         "diagnostic spend policy, not an official convergence run")
     # ---- optional seed override, validated against the committed config's own keys
     seed_files, seed_note = None, ""
     if a.seed_tree:
@@ -1682,6 +1927,13 @@ def main() -> None:
     print(f"[research] train {len(splits['train']):,} / {dev} {len(splits[dev]):,} "
           f"rows; {held} labels absent from this process")
 
+    data_contract = DATA_CONTRACT.build(spec, splits)
+    ws = CAND.workspace_for(a.seed_profile)
+    workspace_contract_sha256 = CAND.contract_sha256(ws)
+    print(f"[research] data contract {data_contract['sha256'][:16]}: "
+          f"{len(data_contract['columns'])} loader columns, "
+          f"{len(data_contract['excluded_sources'])} excluded source declarations")
+
     execution_profile = EXEC.ExecutionProfile(
         framework=a.framework, device=a.device,
         accelerator_policy=a.accelerator_policy,
@@ -1695,9 +1947,10 @@ def main() -> None:
 
     budget = BUD.Budget(max_iterations=a.iterations,
                         max_wall_seconds=a.max_wall_seconds,
-                        max_tokens=a.max_tokens)
+                        max_tokens=a.max_tokens, mode=budget_mode)
     state = ResearchState(
         task={"name": spec.slug, "metric": spec.metric.name,
+              "run_id": run_id,
               "label": spec.label,
               "framing": spec.title,
               "group_by": spec.metric.group_by,
@@ -1707,10 +1960,33 @@ def main() -> None:
               "declared_baseline_valid_primary": spec.baseline.get(dev),
               "convergence": dict(spec.convergence),
               "execution_profile": execution_profile.to_dict(),
-              "hardware_capabilities": capabilities},
-        budget={"max_iterations": a.iterations, "max_wall_seconds": a.max_wall_seconds})
+              "hardware_capabilities": capabilities,
+              "data": data_contract,
+              "data_contract_sha256": data_contract["sha256"],
+              "dataset_fingerprint": data_contract["dataset_fingerprint"],
+              "workspace_contract_sha256": workspace_contract_sha256},
+        budget={"max_iterations": a.iterations, "max_wall_seconds": a.max_wall_seconds,
+                "mode": budget_mode, "max_tokens": a.max_tokens})
 
-    ws = CAND.workspace_for(a.seed_profile)
+    memory_summary = {"mode": "fresh", "source": None, "beliefs_imported": 0}
+    if a.memory != "fresh":
+        source = Path(a.memory_from).resolve()
+        if not source.is_file():
+            raise SystemExit(f"memory state does not exist: {source}")
+        prior = ResearchState.load(source)
+        if a.memory == "continue" and str(a.seed_tree).lower() != str(
+                (prior.champion or {}).get("tree") or "").lower():
+            raise SystemExit("--memory continue requires --seed-tree to equal the prior "
+                             "state's champion tree")
+        try:
+            memory_summary = state.import_memory(prior, mode=a.memory,
+                                                 source=str(source))
+        except ValueError as exc:
+            raise SystemExit(f"research memory refused: {exc}") from None
+        print(f"[research] memory {a.memory}: imported "
+              f"{memory_summary['beliefs_imported']} beliefs from {source.name}; "
+              f"skipped {memory_summary.get('beliefs_skipped_unscoped', 0)} unscoped")
+
     provenance = (provenance_for_seed_files(a.seed_profile, seed_files)
                   if seed_files else CAND.profile_provenance(a.seed_profile))
     if a.seed_tree:
@@ -1738,7 +2014,8 @@ def main() -> None:
                           thinking_summaries=a.thought_summaries,
                           max_tokens=a.llm_max_output_tokens,
                           planner_model=a.planner_model, judge_model=a.judge_model,
-                          coder_model=a.coder_model, reflector_model=a.reflector_model)
+                          coder_model=a.coder_model, reflector_model=a.reflector_model,
+                          run_budget=budget)
     print(f"[research] policy={a.research_policy} search_mode={a.search_mode}"
           + (f" size={a.tournament_size}" if a.research_policy == "tournament" else "")
           + f"  model routing: {agent.routing()}")
@@ -1777,10 +2054,16 @@ def main() -> None:
         "isolation": a.isolation, "max_iterations": a.iterations,
         "max_wall_seconds": a.max_wall_seconds,
         "max_tokens": a.max_tokens,
+        "budget_mode": budget_mode,
         "llm_max_output_tokens": a.llm_max_output_tokens,
+        "max_repairs": a.max_repairs,
         "execution_profile": execution_profile.to_dict(),
         "hardware_capabilities": capabilities,
-        "contract_sha256": CAND.contract_sha256(ws),
+        "contract_sha256": workspace_contract_sha256,
+        "data_contract_sha256": data_contract["sha256"],
+        "dataset_fingerprint": data_contract["dataset_fingerprint"],
+        "data_contract": data_contract,
+        "memory": memory_summary,
         "research_policy": a.research_policy,
         "search_mode": a.search_mode,
         "evidence_class": evidence_class,

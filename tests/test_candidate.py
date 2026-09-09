@@ -88,6 +88,15 @@ for name, files, expect in cases:
     msg = refusal(files)
     check(f"refused: {name}", expect.lower() in msg.lower(), msg[:90])
 
+heldout_msg = refusal({**SEED, "train.py": SEED["train.py"].replace(
+    "    cfg = load_config(params)",
+    "    y = heldout.label\n    cfg = load_config(params)")})
+check("a held-out-label refusal names the offending file and line",
+      "train.py line " in heldout_msg, heldout_msg[:160])
+check("a held-out-label refusal gives the grouped-ranker repair",
+      "group sizes without a label" in heldout_msg
+      and "train and dev" in heldout_msg, heldout_msg[:220])
+
 # 2b -- the model seed is part of candidate identity ---------------------------
 # The typed path excluded `seed` from every dedup tuple, so the agent could not evaluate
 # one configuration at a second seed: it came back as a duplicate. Here the seed lives in

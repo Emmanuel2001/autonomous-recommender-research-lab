@@ -27,7 +27,8 @@ from __future__ import annotations
 
 import json
 import time
-from dataclasses import asdict, dataclass, field
+from copy import deepcopy
+from dataclasses import asdict, dataclass, field, fields as dataclass_fields
 from pathlib import Path
 
 #: How much history each stage is shown. Enough to see a trend, bounded enough that the
@@ -123,6 +124,10 @@ class ResearchState:
         #: These are REFLECTOR-AUTHORED interpretations of scorer-signed numbers. The delta is
         #: signed; the belief about what it means is not. See update_beliefs().
         self.beliefs: dict[str, dict] = {}
+        #: Reflections imported from a compatible earlier run. Kept separate so a report
+        #: never mistakes them for experiments executed in this run.
+        self.imported_reflections: list[dict] = []
+        self.memory_import: dict | None = None
         self.diagnostics: dict = {}
         #: idea -> list of failures, so the same mistake is visible before it repeats
         self.failures: dict[str, list[dict]] = {}
@@ -178,11 +183,11 @@ class ResearchState:
         from a separate process holding the labels and the signing key, and it cannot be
         forged by the loop.
 
-        The INTERPRETATION is not. `belief`, `confidence`, and whether a result *supports* or
-        *contradicts* a mechanism are all authored by the reflector -- an LLM reading that
-        signed number and forming an opinion about what it means. A belief is therefore
-        LLM-authored commentary attached to signed evidence, and it must never be presented as
-        signed evidence itself.
+        The INTERPRETATION is not. `belief`, `llm_confidence`, and whether a result
+        *supports* or *contradicts* a mechanism are all authored by the reflector, which is
+        an LLM reading that signed number and forming an opinion about what it means. A
+        belief is therefore LLM-authored commentary attached to signed evidence, and it
+        must never be presented as signed evidence itself.
 
         What this method contributes is only bookkeeping the loop can vouch for: which
         iteration an update came from, and which files that iteration actually changed. The
@@ -198,14 +203,23 @@ class ResearchState:
                 continue
             b = self.beliefs.setdefault(mech, {
                 "mechanism": mech, "lane": u.get("lane"), "belief": "",
-                "confidence": None, "supporting_iterations": [],
+                "llm_confidence": None,
+                "llm_confidence_note": "reflector-authored and uncalibrated",
+                "evidence_grade": "unreplicated", "supporting_iterations": [],
                 "contradicting_iterations": [], "affected_files": [],
                 "effect_range": [None, None], "unresolved": "",
-                "retry_only_if": "", "last_updated_iteration": None})
+                "retry_only_if": "", "last_updated_iteration": None,
+                "scope": {
+                    "data_contract_sha256": self.task.get("data_contract_sha256"),
+                    "workspace_contract_sha256":
+                        self.task.get("workspace_contract_sha256"),
+                },
+                "source_run_id": self.task.get("run_id")})
             b["lane"] = u.get("lane") or b["lane"]
             b["belief"] = str(u.get("belief") or b["belief"])[:400]
-            if isinstance(u.get("confidence"), (int, float)):
-                b["confidence"] = round(float(u["confidence"]), 3)
+            confidence = u.get("llm_confidence", u.get("confidence"))
+            if isinstance(confidence, (int, float)):
+                b["llm_confidence"] = round(float(confidence), 3)
             key = ("supporting_iterations" if u.get("supports", True)
                    else "contradicting_iterations")
             if exp.iteration not in b[key]:
@@ -221,15 +235,90 @@ class ResearchState:
             b["unresolved"] = str(u.get("unresolved") or b["unresolved"])[:300]
             b["retry_only_if"] = str(u.get("retry_only_if") or b["retry_only_if"])[:300]
             b["last_updated_iteration"] = exp.iteration
+            b["evidence_grade"] = self.evidence_grade(b)
             touched.append(mech)
         return touched
+
+    @staticmethod
+    def evidence_grade(belief: dict) -> str:
+        """Categorical strength from recorded outcomes, never the LLM's confidence."""
+        if belief.get("seed_confirmation"):
+            return "seed_confirmed"
+        contradicting = len(set(belief.get("contradicting_iterations") or []))
+        supporting = len(set(belief.get("supporting_iterations") or []))
+        if contradicting:
+            return "contradicted"
+        if supporting >= 2:
+            return "replicated"
+        if supporting == 1:
+            return "single_signed_result"
+        return "unreplicated"
+
+    @staticmethod
+    def compatibility(task: dict) -> dict:
+        """Facts that must match before conclusions move between runs."""
+        return {key: task.get(key) for key in (
+            "name", "metric", "label", "dev_split", "held_out_split",
+            "dataset_fingerprint", "data_contract_sha256",
+            "workspace_contract_sha256")}
+
+    def import_memory(self, prior: "ResearchState", *, mode: str,
+                      source: str) -> dict:
+        """Import only contract-scoped conclusions from a compatible prior run."""
+        if mode not in ("continue", "import"):
+            raise ValueError("memory mode must be continue or import")
+        current = self.compatibility(self.task)
+        previous = self.compatibility(prior.task)
+        required = ("dataset_fingerprint", "data_contract_sha256",
+                    "workspace_contract_sha256")
+        if any(not current.get(k) or not previous.get(k) for k in required):
+            raise ValueError("memory import requires versioned data and workspace contracts")
+        mismatches = [k for k in current if current.get(k) != previous.get(k)]
+        if mismatches:
+            raise ValueError(f"incompatible research memory fields: {mismatches}")
+
+        imported, skipped = 0, 0
+        for mechanism, raw in prior.beliefs.items():
+            belief = deepcopy(raw)
+            scope = belief.get("scope") or {}
+            if scope.get("data_contract_sha256") != current["data_contract_sha256"]:
+                skipped += 1
+                continue
+            belief["imported"] = True
+            belief["imported_from"] = str(source)
+            belief["evidence_grade"] = self.evidence_grade(belief)
+            if "llm_confidence" not in belief and isinstance(
+                    belief.get("confidence"), (int, float)):
+                belief["llm_confidence"] = belief.pop("confidence")
+            belief["llm_confidence_note"] = "reflector-authored and uncalibrated"
+            self.beliefs[str(mechanism)] = belief
+            imported += 1
+
+        self.imported_reflections = [
+            {**deepcopy(item), "imported": True, "imported_from": str(source)}
+            for item in prior.recent_reflections()[-PROMPT_REFLECTIONS:]]
+        if mode == "continue":
+            self.seen_trees.update(prior.seen_trees)
+            self.failures = deepcopy(prior.failures)
+        self.memory_import = {"mode": mode, "source": str(source),
+                              "beliefs_imported": imported,
+                              "beliefs_skipped_unscoped": skipped}
+        return dict(self.memory_import)
 
     def beliefs_for_prompt(self, n: int = 12) -> list[dict]:
         """Most-recently-updated beliefs first, bounded."""
         ordered = sorted(self.beliefs.values(),
                          key=lambda b: (b.get("last_updated_iteration") or -1),
                          reverse=True)
-        return ordered[:n]
+        out = []
+        for raw in ordered[:n]:
+            b = dict(raw)
+            if "llm_confidence" not in b and isinstance(b.get("confidence"), (int, float)):
+                b["llm_confidence"] = b.pop("confidence")
+            b["llm_confidence_note"] = "reflector-authored and uncalibrated"
+            b["evidence_grade"] = self.evidence_grade(b)
+            out.append(b)
+        return out
 
     # --------------------------------------------------------------- lane stats
     def lane_stats(self) -> dict:
@@ -324,7 +413,8 @@ class ResearchState:
                 "remaining_uncertainty": str(r.get("remaining_uncertainty") or "")[:260],
                 "next_question": str(r.get("next_question") or "")[:260],
             })
-        return out
+        imported = self.imported_reflections[-max(0, n - len(out)):]
+        return imported + out
 
     def for_prompt(self) -> dict:
         """The bounded view every stage is built from."""
@@ -356,6 +446,8 @@ class ResearchState:
     def to_json(self) -> dict:
         return {"task": self.task, "budget": self.budget, "champion": self.champion,
                 "beliefs": self.beliefs,
+                "imported_reflections": self.imported_reflections,
+                "memory_import": self.memory_import,
                 "experiments": [e.to_record() for e in self.experiments],
                 "diagnostics": self.diagnostics, "failures": self.failures,
                 "seen_trees": self.seen_trees,
@@ -375,8 +467,18 @@ class ResearchState:
         d = json.loads(Path(path).read_text())
         s = cls(d.get("task", {}), d.get("budget", {}))
         s.champion = d.get("champion")
-        s.experiments = [Experiment(**e) for e in d.get("experiments", [])]
+        allowed = {f.name for f in dataclass_fields(Experiment)}
+        s.experiments = [Experiment(**{k: v for k, v in e.items() if k in allowed})
+                         for e in d.get("experiments", []) if isinstance(e, dict)]
         s.beliefs = d.get("beliefs", {})
+        for belief in s.beliefs.values():
+            if "llm_confidence" not in belief and isinstance(
+                    belief.get("confidence"), (int, float)):
+                belief["llm_confidence"] = belief.pop("confidence")
+            belief["llm_confidence_note"] = "reflector-authored and uncalibrated"
+            belief["evidence_grade"] = s.evidence_grade(belief)
+        s.imported_reflections = d.get("imported_reflections", [])
+        s.memory_import = d.get("memory_import")
         s.diagnostics = d.get("diagnostics", {})
         s.failures = d.get("failures", {})
         s.seen_trees = d.get("seen_trees", {})

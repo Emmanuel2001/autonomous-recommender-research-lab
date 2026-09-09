@@ -79,6 +79,8 @@ def validate_config(d: dict, source: Path) -> dict:
         raise PortableTaskError("feature_cols must be a non-empty list")
     if d["metric"] == "within_user_ranking_gauc_ndcg5" and not d.get("group_by"):
         raise PortableTaskError("within-user ranking requires group_by")
+    if "personalization" in d and not isinstance(d["personalization"], dict):
+        raise PortableTaskError("personalization must be an object when provided")
     for name in ("train", "valid", "test"):
         bounds = (d.get("splits") or {}).get(name)
         if not (isinstance(bounds, list) and len(bounds) == 2
@@ -188,6 +190,8 @@ def load_task_spec(path: str | Path) -> TaskSpec:
         knowledge={"task_spec_path": str(path),
                    "feature_cols": list(cfg["feature_cols"]),
                    "source_files": list(cfg["files"]),
+                   "loaded_sources": list(cfg["files"]),
                    "time_col": cfg["time_col"],
                    "outcome_columns": list(cfg.get("outcome_columns") or [cfg["label"]]),
-                   "item_col": cfg.get("item_col")})
+                   "item_col": cfg.get("item_col")},
+        personalization=dict(cfg.get("personalization") or {"required": False}))

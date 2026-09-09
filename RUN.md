@@ -133,8 +133,43 @@ python3 -u -m agent.research_driver \
   --reflector-model gemini-3.5-flash-lite \
   --framework auto --device auto --accelerator-policy prefer \
   --iterations 12 --convergence off \
-  --max-tokens 2500000 --run-name architecture_discovery1
+  --budget-mode fixed --max-tokens 2500000 \
+  --llm-max-output-tokens 128000 \
+  --run-name architecture_discovery1
 ```
+
+The two token settings control different things:
+
+- `--max-tokens` is the total research-run budget across planning, judging, coding and
+  reflection calls. Before each call, the harness uses the prompt's UTF-8 byte length as a
+  conservative input bound, applies a role-specific output cap and reserves minimum output
+  capacity for the roles still needed in that iteration. A known-insufficient call is
+  refused before contacting the provider. Use the provider console's spend limit as the
+  independent hard monetary guard.
+- `--llm-max-output-tokens` is the maximum output for one role call. It is 64,000 by
+  default and may be raised to 128,000 for Opus 5 architecture rewrites. Thinking tokens
+  count inside this per-call allowance. Long Anthropic responses use SDK streaming and
+  are assembled before the JSON is validated.
+
+Budget policy is explicit:
+
+- `--budget-mode fixed --max-tokens N` treats `N` as the hard local run allowance.
+- `--budget-mode maximize --max-tokens N --convergence off` is a diagnostic policy that
+  keeps researching until an iteration, time or token limit ends the run. It does not mean
+  that one call receives all remaining tokens.
+- `--budget-mode open` has no local token ceiling, but still obeys iteration and wall-clock
+  limits. This is intentionally incompatible with `--max-tokens`; always keep a provider
+  spend limit when using it.
+
+If a code response still reaches its per-call ceiling, the driver records and charges the
+failed call, then uses the normal bounded repair allowance to retry at medium effort with a
+concise, changed-files-only instruction. It does not silently train partial source code.
+
+Static candidate refusals use the same bounded repair loop. In particular, a grouped ranker
+that references `heldout.label` is never executed: the validator records the exact file and
+line, and the coder must rebuild held-out features and group sizes without labels before the
+candidate can be registered or trained. Keep `--max-repairs` above zero for discovery runs;
+the Research Console discovery preset uses three.
 
 This command can consider LightGBM, XGBoost, torch neural interaction models, multitask
 models and ensembles because those dependencies are visible to the planner and enforced by
@@ -142,6 +177,56 @@ the harness allowlist. They are examples, not a hard-coded menu. The ledger mark
 `diagnostic_discovery` and `submittable: false`. Any winner still needs a new standard run
 with `--convergence official` and multi-seed confirmation before it becomes a submission
 candidate. No discovery run is launched by setup or by selecting the console preset.
+
+### 7B. Data contract seen by the researcher
+
+Before the first LLM call, the driver measures the task loader and records a versioned data
+contract. It contains loader-visible column names, dtypes, roles, split row counts and
+boundaries, label visibility, metric direction, personalization requirements and declared
+excluded sources. It contains no raw feature values and no held-out labels.
+
+For KuaiRand-Pure, the current loader exposes seven fields: `user_id`, `video_id`,
+`author_id`, `tab`, `duration_ms`, `date` and `hourmin`. This is narrower than the raw
+dataset directory. `user_features_pure.csv` and additional basic-video fields are present
+but are not joined. `video_features_statistic_pure.csv` contains full-window aggregates, so
+a naive join can leak held-out-period information. The planner sees both the loaded surface
+and these exclusions. It may propose a new leakage-safe loader in future work, but it may
+not invent a raw column and silently train against it.
+
+Every tournament hypothesis declares `data_columns`, computed `derived_features` and its
+personalization pathway. Unknown loader columns are refused before coding. After coding,
+the harness checks that every declared file actually changed and that a
+`model_architecture` experiment really changed `model.py`.
+
+### 7C. Cross-run memory and belief evidence
+
+Runs start with `--memory fresh` by default. Carrying conclusions is always explicit:
+
+```bash
+# Import compatible beliefs and reflections, but start a separate search lineage.
+python3 -u -m agent.research_driver \
+  --memory import \
+  --memory-from runs/candidates/<prior_run>/state.json \
+  <the rest of the new run arguments>
+
+# Continue the exact prior lineage and dedup history from its champion source.
+python3 -u -m agent.research_driver \
+  --memory continue \
+  --memory-from runs/candidates/<prior_run>/state.json \
+  --seed-tree <the prior state's full champion tree hash> \
+  <the rest of the continuation arguments>
+```
+
+Memory is refused unless task, metric, label, split identity, dataset fingerprint, data
+contract hash and workspace contract hash match. Legacy beliefs with no contract scope are
+skipped, not silently trusted. Imported beliefs keep their source-run provenance and remain
+revisable by new results. Historical ledgers and state files are not rewritten.
+
+`llm_confidence` is the reflector's subjective and uncalibrated opinion. It is not an
+accuracy percentage. `evidence_grade` is separate and categorical:
+`unreplicated`, `single_signed_result`, `replicated`, `contradicted` or `seed_confirmed`.
+The harness computes that grade only from recorded supporting or contradicting experiments
+and seed confirmation evidence, never from the LLM's confidence number.
 
 ## 8. Seed profiles
 

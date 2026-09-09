@@ -222,11 +222,20 @@ def validate_tree(files: dict, workspace: Path | None = None) -> dict:
         if mod in imports:
             raise CandidateError(f"do not import {mod!r}: {why}")
 
-    joined = "\n".join(strip_comments(canon[r]) for r in sorted(canon) if r.endswith(".py"))
-    for pat, why in CANDIDATE_PATTERNS:
-        m = pat.search(joined)
-        if m:
-            raise CandidateError(f"the tree references {m.group(0)!r}: {why}")
+    # Check one file at a time so a repair prompt gets an exact source location. The old
+    # joined-tree scan said only "the tree references heldout.label". That was enough to
+    # refuse unsafe code, but not enough for a coder repairing a multi-file ranking model
+    # to know which split helper still contained the reference.
+    for rel in sorted(canon):
+        if not rel.endswith(".py"):
+            continue
+        source = strip_comments(canon[rel])
+        for pat, why in CANDIDATE_PATTERNS:
+            m = pat.search(source)
+            if m:
+                line = source.count("\n", 0, m.start()) + 1
+                raise CandidateError(
+                    f"{rel} line {line}: executable code references {m.group(0)!r}: {why}")
 
     return {"tree": AR.tree_hash(canon, already_canonical=True),
             "contract_sha256": contract_sha256(workspace),

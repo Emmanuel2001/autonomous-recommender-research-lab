@@ -260,17 +260,25 @@ JS = """
   // Presets fill the launch form; they never submit it.
   var P={
     smoke:{iterations:'1',convergence:'off',tournament_size:'6',max_tokens:'120000',
+           llm_max_output_tokens:'64000',
+           max_repairs:'1',
            max_wall_seconds:'900',research_policy:'tournament',framework:'auto',
            device:'auto',accelerator_policy:'prefer',search_mode:'standard'},
     mps:{iterations:'6',convergence:'off',tournament_size:'6',max_tokens:'400000',
+         llm_max_output_tokens:'128000',
+         max_repairs:'2',
          max_wall_seconds:'3600',research_policy:'tournament',framework:'torch',
          device:'mps',accelerator_policy:'prefer',seed_profile:'accelerated',
          search_mode:'standard'},
     discovery:{iterations:'12',convergence:'off',tournament_size:'8',max_tokens:'2500000',
+              llm_max_output_tokens:'128000',
+              max_repairs:'3',
               max_wall_seconds:'21600',research_policy:'tournament',framework:'auto',
               device:'auto',accelerator_policy:'prefer',seed_profile:'minimal',
               search_mode:'discovery'},
     official:{iterations:'50',convergence:'official',tournament_size:'6',
+              llm_max_output_tokens:'64000',
+              max_repairs:'1',
               max_wall_seconds:'21600',research_policy:'tournament',framework:'auto',
               device:'auto',accelerator_policy:'prefer',seed_profile:'inherited',
               search_mode:'standard'}
@@ -625,7 +633,8 @@ def view_live(d: dict) -> str:
         ("belief update", "".join(
             f"<div>{esc(b.get('belief'))} <span class=faint>(mechanism: "
             f"{esc(b.get('mechanism'))}; supports={esc(b.get('supports'))}; "
-            f"confidence={esc(b.get('confidence'))})</span></div>"
+            f"LLM confidence={esc(b.get('llm_confidence', b.get('confidence')))} "
+            f"(uncalibrated))</span></div>"
             for b in (refl.get("belief_updates") or [])) or "&mdash;"),
         ("remaining uncertainty", dash(refl.get("remaining_uncertainty"))),
         ("next question", dash(refl.get("next_question"))),
@@ -871,10 +880,12 @@ def view_newrun(token: str) -> str:
             _chk("no_device_fallback", "Refuse the run if the requested device is unavailable"),
         ]),
         ("Budgets", False, [
-            _txt("max_tokens", "", "hard token ceiling", "number"),
+            _txt("max_tokens", "", "hard run budget; calls are checked before sending", "number"),
+            _txt("llm_max_output_tokens", "64000",
+                 "per LLM call; Opus 5 supports up to 128000", "number"),
             _txt("max_wall_seconds", "21600", "wall-clock cap", "number"),
             _txt("max_seconds", "", "per-fit cap", "number"),
-            _txt("max_repairs", "1", "code repair attempts", "number"),
+            _txt("max_repairs", "3", "bounded code repair attempts", "number"),
         ]),
         ("Isolation", False, [
             _sel("patch_isolation", ["seatbelt", "subprocess", "docker", "none"], "seatbelt",

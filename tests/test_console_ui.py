@@ -158,6 +158,8 @@ check("the exact required sentence is shown when no summary was returned",
       UI.NO_SUMMARY in text_of(live_none), UI.NO_SUMMARY[:44])
 check("the reasoning panel is still populated without a summary",
       "pairwise helped" in text_of(live_none))
+check("the console labels legacy belief confidence as uncalibrated",
+      "LLM confidence=0.9 (uncalibrated)" in text_of(live_none))
 check("the panel does not claim to expose chain-of-thought",
       "not hidden chain-of-thought" in text_of(live_none).lower())
 live_some = UI.view_live(UI.digest(synthetic(with_summary=True)))

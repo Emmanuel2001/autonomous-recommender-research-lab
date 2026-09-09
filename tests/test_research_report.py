@@ -109,6 +109,14 @@ ENTRIES = [
                    "iteration_wall_max": 41.0,
                    "stage_seconds": {"fit": 60.0, "plan": 10.0, "code": 8.0}},
         "champion": {"tree": a1.tree, "primary": 0.604601},
+        "beliefs": {"pairwise ordering": {
+            "mechanism": "pairwise ordering", "lane": "objective_loss",
+            "belief": "ranking-aligned loss is useful", "llm_confidence": 0.8,
+            "evidence_grade": "single_signed_result",
+            "supporting_iterations": [1], "contradicting_iterations": [],
+            "affected_files": ["config.json"], "effect_range": [0.002, 0.004],
+            "unresolved": "architecture interaction", "retry_only_if": "new data",
+            "last_updated_iteration": 1}},
         "manual_interventions": []}}},
 ]
 
@@ -200,6 +208,10 @@ check("an ABSENT override field is reported as 'not recorded', never as false",
             if e["payload"].get("kind") == "run_start" else e) for e in ENTRIES],
           artifact_root=STORE))
 check("manual interventions are counted", "Manual interventions:</b> 0" in H)
+check("belief confidence is explicitly labelled as LLM-authored and uncalibrated",
+      "LLM confidence" in H and "uncalibrated" in H)
+check("categorical evidence is rendered separately from confidence",
+      "single_signed_result" in H)
 
 # 6 -- confirmation fits must not be counted as run iterations -----------------
 d = RR.extract(ENTRIES)

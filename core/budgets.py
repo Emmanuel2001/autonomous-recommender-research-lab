@@ -32,6 +32,20 @@ from dataclasses import dataclass, field
 OFFICIAL_MAX_ITERATIONS = 50
 OFFICIAL_MAX_WALL_SECONDS = 6 * 60 * 60
 
+# Output allocations are deliberately role-specific. Planning and judging return compact
+# structured decisions; code may legitimately return several complete source files.
+ROLE_OUTPUT_CAPS = {"plan": 20_000, "judge": 12_000,
+                    "code": 128_000, "reflect": 12_000}
+ROLE_MINIMUM_OUTPUT = {"plan": 4_000, "judge": 3_000,
+                       "code": 16_000, "reflect": 3_000}
+ROLE_RESERVE_AFTER = {
+    "plan": ROLE_MINIMUM_OUTPUT["judge"] + ROLE_MINIMUM_OUTPUT["code"]
+            + ROLE_MINIMUM_OUTPUT["reflect"],
+    "judge": ROLE_MINIMUM_OUTPUT["code"] + ROLE_MINIMUM_OUTPUT["reflect"],
+    "code": ROLE_MINIMUM_OUTPUT["reflect"],
+    "reflect": 0,
+}
+
 
 class BudgetExceeded(RuntimeError):
     """Raised only when a caller asks to start work the budget cannot cover."""
@@ -78,7 +92,7 @@ class Budget:
 
     def __init__(self, max_iterations: int = OFFICIAL_MAX_ITERATIONS,
                  max_wall_seconds: float = OFFICIAL_MAX_WALL_SECONDS,
-                 max_tokens: int | None = None):
+                 max_tokens: int | None = None, mode: str | None = None):
         if max_iterations < 1:
             raise ValueError("max_iterations must be at least 1")
         if max_wall_seconds <= 0:
@@ -86,12 +100,24 @@ class Budget:
         self.max_iterations = int(max_iterations)
         self.max_wall_seconds = float(max_wall_seconds)
         self.max_tokens = None if max_tokens is None else int(max_tokens)
+        if self.max_tokens is not None and self.max_tokens <= 0:
+            raise ValueError("max_tokens must be positive")
+        self.mode = mode or ("fixed" if self.max_tokens is not None else "open")
+        if self.mode not in ("fixed", "maximize", "open"):
+            raise ValueError("budget mode must be fixed, maximize, or open")
+        if self.mode in ("fixed", "maximize") and self.max_tokens is None:
+            raise ValueError(f"budget mode {self.mode!r} requires max_tokens")
+        if self.mode == "open" and self.max_tokens is not None:
+            raise ValueError("open budget mode cannot also set max_tokens")
         self._t0 = time.monotonic()
         self.started_epoch = time.time()
         self.costs: list[IterationCost] = []
         self.tokens_in = 0
         self.tokens_out = 0
         self.tokens_thinking = 0
+        self.call_preflights = 0
+        self.call_preflight_refusals = 0
+        self._call_stop_reason: str | None = None
 
     # ------------------------------------------------------------------ reading
     @property
@@ -123,7 +149,36 @@ class Budget:
                     f"(elapsed {self.elapsed():.0f}s)")
         if self.max_tokens is not None and self.tokens() >= self.max_tokens:
             return f"token_cap:{self.max_tokens}"
+        if self._call_stop_reason:
+            return self._call_stop_reason
         return None
+
+    def reserve_call(self, role: str, requested_output: int,
+                     prompt_bytes: int) -> int:
+        """Return a safe output allowance or refuse before contacting a provider.
+
+        ``prompt_bytes`` is a conservative upper bound on tokenizer pieces, unlike a
+        chars/4 estimate that can undercount code and Unicode. The provider reports the
+        exact input count afterward; this preflight exists to prevent a known-insufficient
+        call from consuming money and leaving no room for coding or reflection.
+        """
+        self.call_preflights += 1
+        requested = max(1, int(requested_output))
+        role_cap = ROLE_OUTPUT_CAPS.get(role, requested)
+        requested = min(requested, role_cap)
+        if self.max_tokens is None:
+            return requested
+        remaining = self.max_tokens - self.tokens()
+        reserve = ROLE_RESERVE_AFTER.get(role, 0)
+        available = remaining - max(0, int(prompt_bytes)) - reserve
+        minimum = min(requested, ROLE_MINIMUM_OUTPUT.get(role, 1_024))
+        if available < minimum:
+            self.call_preflight_refusals += 1
+            self._call_stop_reason = (
+                f"token_reserve:{role} needs at least {minimum} output tokens plus "
+                f"{reserve} reserved downstream; {max(0, available)} available")
+            raise BudgetExceeded(self._call_stop_reason)
+        return min(requested, available)
 
     def would_exceed_wall(self, estimated_seconds: float) -> bool:
         """Whether starting work of this estimated length would run past the cap.
@@ -153,6 +208,9 @@ class Budget:
                 "tokens_total_from_iterations": sum(
                     c.tokens_in + c.tokens_out + c.tokens_thinking for c in self.costs),
                 "max_tokens": self.max_tokens,
+                "mode": self.mode,
+                "call_preflights": self.call_preflights,
+                "call_preflight_refusals": self.call_preflight_refusals,
                 "iteration_wall_seconds": [round(x, 2) for x in per],
                 "iteration_wall_mean": round(sum(per) / len(per), 2) if per else None,
                 "iteration_wall_max": round(max(per), 2) if per else None,

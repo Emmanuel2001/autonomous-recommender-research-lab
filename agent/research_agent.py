@@ -32,6 +32,8 @@ import os
 import time
 from pathlib import Path
 
+from core import budgets as BUDGETS
+
 ROOT = Path(__file__).resolve().parents[1]
 WORKSPACE = ROOT / "research_workspace"
 
@@ -92,6 +94,22 @@ def _hypothesis_properties() -> dict:
             "description": "For model_architecture candidates: the structural change "
                            "to model.py that makes this a different architecture."},
         "files_to_change": {"type": "array", "items": {"type": "string"}},
+        "data_columns": {
+            "type": "array", "items": {"type": "string"},
+            "description": "Raw loader columns this experiment will read. Use exact "
+                           "names from task.data.columns. Generated features belong in "
+                           "derived_features, not here."},
+        "derived_features": {
+            "type": "array", "items": {"type": "string"},
+            "description": "Features computed only from declared loader columns."},
+        "personalization": {
+            "type": "string",
+            "enum": ["preserved", "added", "non_personalized_ablation",
+                     "not_applicable"]},
+        "personalization_pathway": {
+            "type": "string",
+            "description": "How user information affects ranking, or why personalization "
+                           "does not apply."},
         "runtime_estimate": {"type": "string",
                              "description": "rough fit time and intended device; read the "
                                             "live execution profile and capabilities"},
@@ -124,7 +142,9 @@ def tournament_schema(size: int = 6) -> dict:
                 "items": {"type": "object", "additionalProperties": False,
                           "required": ["id", "lane", "hypothesis", "mechanism",
                                        "expected_direction", "expected_magnitude",
-                                       "information_value", "files_to_change", "parent"],
+                                       "information_value", "files_to_change",
+                                       "data_columns", "personalization",
+                                       "personalization_pathway", "parent"],
                           "properties": _hypothesis_properties()},
             },
             "lane_coverage_note": {"type": "string"},
@@ -249,7 +269,8 @@ def plan_schema() -> dict:
         "type": "object", "additionalProperties": False,
         "required": ["hypothesis", "evidence", "stage", "mechanism",
                      "expected_direction", "expected_magnitude", "parent",
-                     "files_to_change", "risk", "success_criteria"],
+                     "files_to_change", "data_columns", "personalization",
+                     "personalization_pathway", "risk", "success_criteria"],
         "properties": {
             "hypothesis": {"type": "string", "minLength": 10, "maxLength": 600,
                            "description": "One concrete, falsifiable change to try."},
@@ -273,6 +294,13 @@ def plan_schema() -> dict:
                                       "earlier candidate to fork instead."},
             "files_to_change": {"type": "array", "minItems": 1, "maxItems": 8,
                                 "items": {"type": "string"}},
+            "data_columns": {"type": "array", "items": {"type": "string"}},
+            "derived_features": {"type": "array", "items": {"type": "string"}},
+            "personalization": {
+                "type": "string",
+                "enum": ["preserved", "added", "non_personalized_ablation",
+                         "not_applicable"]},
+            "personalization_pathway": {"type": "string", "maxLength": 600},
             "risk": {"type": "string", "maxLength": 600},
             "fallback": {"type": "string", "maxLength": 600},
             "success_criteria": {"type": "string", "maxLength": 600},
@@ -336,7 +364,7 @@ def reflect_schema() -> dict:
                                "you believe and how confident you are, and do not overstate.",
                 "items": {
                     "type": "object", "additionalProperties": False,
-                    "required": ["mechanism", "lane", "confidence", "belief"],
+                    "required": ["mechanism", "lane", "llm_confidence", "belief"],
                     "properties": {
                         "mechanism": {"type": "string", "minLength": 4,
                                       "description": "the mechanism or research question, "
@@ -346,7 +374,11 @@ def reflect_schema() -> dict:
                         "belief": {"type": "string", "minLength": 4,
                                    "description": "what is now believed, e.g. 'harmful from "
                                                   "a pointwise baseline'"},
-                        "confidence": {"type": "number", "minimum": 0, "maximum": 1},
+                        "llm_confidence": {
+                            "type": "number", "minimum": 0, "maximum": 1,
+                            "description": "Your subjective, uncalibrated confidence. "
+                                           "The harness computes evidence strength "
+                                           "separately from recorded outcomes."},
                         "supports": {"type": "boolean",
                                      "description": "did THIS iteration support the belief"},
                         "affected_files": {"type": "array", "items": {"type": "string"}},
@@ -388,10 +420,17 @@ THE CONTRACT YOUR CODE MUST SATISFY
 {_contract_text()}
 
 RULES THAT ARE ENFORCED, NOT ADVISORY
+  * `task.data` is the authoritative loader contract. It describes what candidate code can
+    actually read, not every file in the raw dataset directory. Declare exact raw inputs in
+    `data_columns`; invented names are refused before coding. Contract facts override any
+    conflicting LLM-authored belief.
   * You may edit only these files: {_mutable()}. contract.py is immutable and a tree
     containing it is refused.
-  * The held-out split's labels are not in the process. Do not try to reach them; the
-    kernel denies it and the attempt is recorded.
+  * The held-out split's labels are not in the process. Executable candidate source must
+    never reference `heldout.label` or an equivalent label lookup. For grouped or listwise
+    rankers, construct (features, labels, group sizes) for train/dev, but construct only
+    (features, group sizes) for held-out. Early stopping and evaluation sets use dev only.
+    Do not evade this rule with dynamic attribute access; the kernel also enforces it.
   * Every candidate runs sandboxed with no network. Extra packages must be declared and
     must be on the allowlist. The permitted package names are: {allowed}.
   * The number that decides anything is produced by a separate signing scorer. Your own
@@ -405,11 +444,30 @@ RULES THAT ARE ENFORCED, NOT ADVISORY
     enough. If convergence is disabled, spend the budget: finishing early earns nothing."""
 
 
+def _prompt_state(state: dict) -> dict:
+    """Return the changing run state without duplicating the task contract.
+
+    ``_rules_block`` already carries the complete authoritative task and data contract in
+    the system message. Repeating it in the user message wastes input tokens and, under a
+    hard run budget, can crowd out the coder. The hash remains in the changing state so a
+    recorded prompt can still be tied to the exact contract.
+    """
+    out = {k: v for k, v in state.items() if k != "task"}
+    task = state.get("task") or {}
+    out["task_contract_reference"] = {
+        "name": task.get("name"),
+        "data_contract_sha256": task.get("data_contract_sha256"),
+        "dataset_fingerprint": task.get("dataset_fingerprint"),
+        "workspace_contract_sha256": task.get("workspace_contract_sha256"),
+    }
+    return out
+
+
 def plan_prompt(state: dict, parent_source: dict, parent_telemetry: dict | None) -> tuple:
     sysb = [_rules_block(state.get("task", {}))]
     tel = _telemetry_view(parent_telemetry)
     user = f"""RESEARCH STATE
-{json.dumps(state, indent=2, sort_keys=True, default=str)[:12000]}
+{json.dumps(_prompt_state(state), indent=2, sort_keys=True, default=str)[:12000]}
 
 THE CURRENT CHAMPION'S SOURCE
 {_render_source(parent_source)}
@@ -446,7 +504,7 @@ def tournament_prompt(state: dict, parent_source: dict, parent_telemetry: dict |
     tel = _telemetry_view(parent_telemetry)
     lanes = "\n".join(f"    {i+1}. {l}" for i, l in enumerate(LANES))
     user = f"""RESEARCH STATE
-{json.dumps(state, indent=2, sort_keys=True, default=str)[:14000]}
+{json.dumps(_prompt_state(state), indent=2, sort_keys=True, default=str)[:14000]}
 
 THE CURRENT CHAMPION'S SOURCE
 {_render_source(parent_source)}
@@ -482,7 +540,10 @@ negative result removes a whole direction from future consideration.
 
 Read `beliefs` before proposing. If a candidate revisits a mechanism already recorded as
 unhelpful, `novelty_vs_history` must say what has materially changed -- otherwise do not
-propose it."""
+propose it. For every candidate, fill `data_columns` with exact names from the authoritative
+loader contract and put computed quantities in `derived_features`. If the task declares
+personalization required, either describe the real user-conditioned pathway or explicitly
+mark the experiment `non_personalized_ablation`."""
     discovery = (state.get("budget", {}).get("search_mode") == "discovery")
     if discovery:
         user += """
@@ -519,7 +580,7 @@ def judge_prompt(candidates: list, state: dict, parent_source: dict,
 {json.dumps(candidates, indent=2, sort_keys=True, default=str)[:16000]}
 
 RESEARCH STATE (history, beliefs, failures, calibration, live budget)
-{json.dumps(state, indent=2, sort_keys=True, default=str)[:12000]}
+{json.dumps(_prompt_state(state), indent=2, sort_keys=True, default=str)[:12000]}
 
 THE CURRENT CHAMPION'S SOURCE
 {_render_source(parent_source)}
@@ -574,7 +635,8 @@ def _telemetry_view(parent_telemetry: dict | None) -> str:
     if not parent_telemetry:
         return "none"
     keep = ("epochs_run", "dev_primary_best", "train_primary", "dev_primary", "gap",
-            "train_loss", "epoch_seconds", "n_features")
+            "train_loss", "epoch_seconds", "n_features", "dataset_columns",
+            "framework", "device")
     return json.dumps({k: v for k, v in parent_telemetry.items() if k in keep},
                       indent=2, default=str)[:4000]
 
@@ -610,6 +672,16 @@ an import or a `dependencies` field alone does not install anything."""
 Fix the cause. If the error shows the approach cannot work as written, say so in
 `reasoning` and return the smallest change that makes the hypothesis testable -- do not
 quietly abandon the hypothesis and return something unrelated."""
+        if "heldout.label" in str(error).lower():
+            tail += """
+
+MANDATORY HELD-OUT REPAIR
+The safety validator found an executable held-out label reference. Preserve the selected
+hypothesis, but remove every such reference from executable source. For LightGBM or another
+grouped ranker, build labels and eval_set entries for train and dev only. Build held-out X
+and group sizes from permitted feature columns and user identifiers, predict without a
+held-out label, and restore predictions to original row order. Do not weaken, rename, or
+evade the validator."""
     return sysb, head + "\n\n" + tail
 
 
@@ -740,13 +812,15 @@ class ResearchAgent:
                  effort: str = "high", thinking_level: str | None = None,
                  thinking_summaries: bool = False,
                  timeout: float = 600.0, max_retries: int = 2,
-                 max_tokens: int = 32000,
+                 max_tokens: int = 64000,
                  planner_model: str | None = None, judge_model: str | None = None,
-                 coder_model: str | None = None, reflector_model: str | None = None):
+                 coder_model: str | None = None, reflector_model: str | None = None,
+                 run_budget=None):
         self.backend, self.effort, self.max_tokens = backend, effort, max_tokens
         self.thinking_level = thinking_level
         self.thinking_summaries = bool(thinking_summaries)
         self.timeout, self.max_retries, self.base_url = timeout, max_retries, base_url
+        self.run_budget = run_budget
         self.usage: list[dict] = []
         self._key = (api_key or os.environ.get("TRACK2_LLM_API_KEY")
                      or os.environ.get("ANTHROPIC_API_KEY") or "")
@@ -831,12 +905,20 @@ class ResearchAgent:
         return agg
 
     # ------------------------------------------------------------------ one call
-    def _ask(self, role: str, sysb: list, user: str, schema: dict) -> tuple[dict, dict]:
+    def _ask(self, role: str, sysb: list, user: str, schema: dict,
+             effort_override: str | None = None) -> tuple[dict, dict]:
         from agent.proposer import ProposerError, ProposerRefusal, ProposerTruncated
         kind, client, model = self._client_for(role)
         t0 = time.perf_counter()
+        call_effort = effort_override or self.effort
+        prompt_bytes = len(("\n\n".join(sysb) + "\n" + user).encode("utf-8"))
+        call_max_tokens = (self.run_budget.reserve_call(
+            role, self.max_tokens, prompt_bytes) if self.run_budget is not None
+            else min(self.max_tokens, BUDGETS.ROLE_OUTPUT_CAPS.get(role, self.max_tokens)))
         usage = {"role": role, "backend": self.backend, "model": model,
-                 "effort": self.effort, "retries": 0, "refused": False,
+                 "effort": call_effort, "max_output_tokens": call_max_tokens,
+                 "prompt_bytes_upper_bound": prompt_bytes,
+                 "retries": 0, "refused": False,
                  "truncated": False}
 
         if kind == "backend":
@@ -845,7 +927,8 @@ class ResearchAgent:
             sch = (strip_schema(schema, GEMINI_SAFE_KEYWORDS)
                    if self.backend == "gemini" else schema)
             try:
-                resp, u = client.complete_json(system, user, sch)
+                resp, u = client.complete_json(
+                    system, user, sch, max_output_tokens=call_max_tokens)
                 text = client.text_of(resp)
             except BackendError as e:
                 usage["seconds"] = round(time.perf_counter() - t0, 2)
@@ -863,13 +946,25 @@ class ResearchAgent:
             import anthropic
             schema = anthropic_schema(schema)
             req = dict(
-                model=model, max_tokens=self.max_tokens,
+                model=model, max_tokens=call_max_tokens,
                 system=[{"type": "text", "text": t} for t in sysb],
                 messages=[{"role": "user", "content": user}],
                 output_config={"format": {"type": "json_schema", "schema": schema},
-                               "effort": self.effort},
+                               "effort": call_effort},
                 betas=["server-side-fallback-2026-07-01"], fallbacks="default",
             )
+
+            def send():
+                """Use streaming for long Claude responses and still return one message.
+
+                Anthropic's Python SDK requires streaming when ``max_tokens`` is above
+                21,333.  ``get_final_message`` preserves the existing structured-output
+                path while avoiding an HTTP timeout on a legitimate multi-file rewrite.
+                """
+                if call_max_tokens > 21_333:
+                    with client.beta.messages.stream(**req) as stream:
+                        return stream.get_final_message()
+                return client.beta.messages.create(**req)
 
             def remember_api_failure(exc, first=None):
                 """Keep failed-call telemetry even when the provider returns no usage."""
@@ -889,7 +984,7 @@ class ResearchAgent:
                 self.usage.append(usage)
 
             try:
-                resp = client.beta.messages.create(**req)
+                resp = send()
             except anthropic.BadRequestError as first:
                 if not anthropic_retry_without_fallback(first):
                     remember_api_failure(first)
@@ -897,7 +992,7 @@ class ResearchAgent:
                 usage["retries"] += 1
                 req.pop("betas", None); req.pop("fallbacks", None)
                 try:
-                    resp = client.beta.messages.create(**req)
+                    resp = send()
                 except anthropic.APIError as second:
                     remember_api_failure(second, first)
                     raise
@@ -932,8 +1027,8 @@ class ResearchAgent:
             usage["truncated"] = True
             self.usage.append(usage)
             raise ProposerTruncated(
-                f"role {role} hit max_tokens before closing its JSON; retry at lower effort "
-                f"or with a smaller parent", usage)
+                f"role {role} hit the {call_max_tokens:,}-token per-call output ceiling "
+                f"before closing its JSON", usage)
         self.usage.append(usage)
         try:
             return json.loads(text), usage
@@ -967,7 +1062,18 @@ class ResearchAgent:
 
     def code(self, plan, parent_source, state, error=None, attempt=0):
         s, u = code_prompt(plan, parent_source, error, attempt, state)
-        return self._ask("code", s, u, code_schema())
+        # Adaptive thinking counts against Claude's output ceiling.  If a high-effort code
+        # call exhausted that ceiling, retry the same bounded hypothesis at medium effort.
+        # Planning and judging remain at the operator-requested effort; this only prevents
+        # hidden reasoning from crowding the actual replacement files out of the response.
+        retry_after_truncation = bool(
+            error and error.get("error_type") == "ProposerTruncated")
+        if retry_after_truncation:
+            u += ("\n\nThe previous response exhausted its output allowance. Return only "
+                  "the files that actually change, keep reasoning concise, and produce "
+                  "one complete JSON object.")
+        return self._ask("code", s, u, code_schema(),
+                         effort_override="medium" if retry_after_truncation else None)
 
     def reflect(self, plan, result, state):
         s, u = reflect_prompt(plan, result, state)

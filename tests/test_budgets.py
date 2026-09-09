@@ -117,6 +117,38 @@ check("thinking is not silently folded into output",
       sm3["tokens_thinking"] == 23 and sm3["tokens_out"] == 7,
       f"thinking={sm3['tokens_thinking']} out={sm3['tokens_out']}")
 
+# 5c -- provider calls are preflighted and role capacity is reserved -----------
+pre = B.Budget(max_iterations=9, max_wall_seconds=600, max_tokens=100_000)
+plan_allowance = pre.reserve_call("plan", 64_000, prompt_bytes=20_000)
+check("planning uses a role-specific output cap",
+      plan_allowance == B.ROLE_OUTPUT_CAPS["plan"], str(plan_allowance))
+check("planning reserves later judge, code and reflection capacity",
+      plan_allowance + 20_000 + B.ROLE_RESERVE_AFTER["plan"] <= 100_000)
+pre.add_tokens(in_=20_000, out_=plan_allowance)
+code_allowance = pre.reserve_call("code", 64_000, prompt_bytes=10_000)
+check("coder receives the largest safe remainder",
+      code_allowance >= B.ROLE_MINIMUM_OUTPUT["code"], str(code_allowance))
+
+too_small = B.Budget(max_iterations=9, max_wall_seconds=600, max_tokens=25_000)
+refusal = raises(B.BudgetExceeded, too_small.reserve_call,
+                 "plan", 64_000, 10_000)
+check("a known-insufficient call is refused before provider contact",
+      "token_reserve:plan" in refusal, refusal)
+check("preflight refusal becomes the run stop reason",
+      (too_small.stop_reason() or "").startswith("token_reserve:plan"),
+      str(too_small.stop_reason()))
+check("preflight refusal spends no tokens", too_small.tokens() == 0)
+check("preflight activity is reported",
+      too_small.summary()["call_preflight_refusals"] == 1)
+
+opened = B.Budget(max_iterations=2, max_wall_seconds=60, mode="open")
+check("open mode has no token limit",
+      opened.reserve_call("code", 128_000, 9_999_999) == 128_000)
+maximized = B.Budget(max_iterations=2, max_wall_seconds=60,
+                     max_tokens=200_000, mode="maximize")
+check("maximize mode remains bounded by the declared allowance",
+      maximized.mode == "maximize" and maximized.max_tokens == 200_000)
+
 # 6 -- stages accumulate, and a crashed iteration still costs -------------------
 s = B.Budget(max_iterations=9, max_wall_seconds=600)
 with s.iteration() as it:
@@ -213,6 +245,12 @@ check("IterationCost.to_record is JSON-shaped",
 check("max_iterations must be >= 1", raises(ValueError, B.Budget, max_iterations=0) != "")
 check("max_wall_seconds must be positive",
       raises(ValueError, B.Budget, max_wall_seconds=0) != "")
+check("fixed mode requires a token ceiling",
+      raises(ValueError, B.Budget, mode="fixed") != "")
+check("open mode rejects a contradictory token ceiling",
+      raises(ValueError, B.Budget, mode="open", max_tokens=100) != "")
+check("token ceilings must be positive",
+      raises(ValueError, B.Budget, max_tokens=0) != "")
 
 print()
 bad_l = [n for n, ok in R if not ok]

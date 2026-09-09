@@ -79,6 +79,7 @@ BOUNDS = {
     "model_seed": (0, 2**31 - 1, int),
     "max_seconds": (10.0, 86_400.0, float),
     "max_tokens": (1_000, 20_000_000, int),
+    "llm_max_output_tokens": (1_024, 128_000, int),
     "patch_seconds": (10.0, 3_600.0, float),
     # the organisers' cap is 6 h; the upper bound here is that, not a round number
     "max_wall_seconds": (60.0, 21_600.0, float),
@@ -124,6 +125,8 @@ class Spec:
     patch_isolation: str = "seatbelt"
     max_seconds: float = 5400.0
     max_tokens: int = 5_000_000
+    #: Per LLM call, distinct from the total run budget above.
+    llm_max_output_tokens: int = 64_000
     patch_seconds: float = 900.0
     epsilon_greedy: float = 0.25
     allow_random_log: bool = False
@@ -164,6 +167,7 @@ class Spec:
                   "--fit-seconds", str(self.patch_seconds),
                   "--max-repairs", str(self.max_repairs),
                   "--max-tokens", str(self.max_tokens),
+                  "--llm-max-output-tokens", str(self.llm_max_output_tokens),
                   "--research-policy", self.research_policy,
                   "--search-mode", self.search_mode,
                   "--tournament-size", str(self.tournament_size),
@@ -284,6 +288,7 @@ def parse(form: dict) -> Spec:
     s.accelerator_policy = _enum(
         form, "accelerator_policy", ACCELERATOR_POLICIES, s.accelerator_policy)
     for k in ("iterations", "seed", "model_seed", "max_seconds", "max_tokens",
+              "llm_max_output_tokens",
               "patch_seconds", "epsilon_greedy", "max_wall_seconds", "max_repairs",
               "tournament_size", "max_coverage_repairs"):
         setattr(s, k, _num(form, k, getattr(s, k)))

@@ -66,7 +66,8 @@ FORBIDDEN_PATTERNS = [
      "grading its own homework -- return raw scores and let the scorer rank them"),
     (re.compile(r"\bheldout\.label\b|heldout\[.label.\]"),
      "held-out labels are None by construction; using them is the one thing that "
-     "invalidates the submission"),
+     "invalidates the submission. Build held-out features and user-group sizes without "
+     "a label, and restrict labels and evaluation sets to train and dev"),
 ]
 
 

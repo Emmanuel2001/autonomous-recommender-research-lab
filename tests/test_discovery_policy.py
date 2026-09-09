@@ -44,6 +44,10 @@ def candidate(cid, lane, files):
         "implementation_risk": "bounded", "leakage_risk": "none",
         "success_criteria": "dev metric rises",
         "failure_interpretation": "direction unsupported", "parent": "champion",
+        "data_columns": ["user_id", "video_id"],
+        "derived_features": [],
+        "personalization": "preserved",
+        "personalization_pathway": "user-specific embeddings interact with each item",
     }
 
 
@@ -75,6 +79,39 @@ check("a config-only width change cannot masquerade as architecture",
       any("must include model.py" in p for p in config_only["problems"]),
       str(config_only["problems"]))
 arch["files_to_change"] = ["model.py"]
+
+print("== data and realization contracts")
+loader_contract = {
+    "columns": [{"name": "user_id"}, {"name": "video_id"}, {"name": "duration_ms"}],
+    "personalization": {
+        "required": True,
+        "non_personalized_allowed_only_as_declared_ablation": True,
+    },
+}
+contract_cands = [dict(c) for c in cands]
+_, contract_ok = RD.validate_tournament(
+    {"candidates": contract_cands}, 6, data_contract=loader_contract)
+check("valid loader columns and a user pathway pass before coding",
+      contract_ok["lane_coverage_ok"], str(contract_ok["problems"]))
+contract_cands[0]["data_columns"] = ["user_id", "invented_profile_field"]
+_, bad_column = RD.validate_tournament(
+    {"candidates": contract_cands}, 6, data_contract=loader_contract)
+check("an invented raw column is refused before coding",
+      any("invented_profile_field" in p for p in bad_column["problems"]),
+      str(bad_column["problems"]))
+no_pathway = dict(cands[0], personalization_pathway="")
+check("personalized work without a user-conditioned pathway is refused",
+      any("personalization_pathway" in p for p in
+          RD.plan_contract_problems(no_pathway, loader_contract)))
+ablation = dict(cands[0], personalization="non_personalized_ablation",
+                personalization_pathway="")
+check("an explicitly declared non-personalized ablation is accepted",
+      RD.plan_contract_problems(ablation, loader_contract) == [])
+check("a declared model.py edit with a config-only patch is refused",
+      any("model.py" in p for p in
+          RD.realization_problems(arch, ["config.json"])))
+check("an architecture patch that really changes model.py passes realization",
+      RD.realization_problems(arch, ["model.py"]) == [])
 
 print("== architecture funding floor")
 check("standard mode never forces architecture",
@@ -165,7 +202,8 @@ for i in range(10):
     state_for_summary.beliefs[f"mechanism {i} " + "m" * 400] = {
         "mechanism": f"mechanism {i} " + "m" * 400,
         "lane": "model_architecture", "belief": "b" * 1600,
-        "confidence": 0.7, "supporting_iterations": list(range(20)),
+        "llm_confidence": 0.7, "evidence_grade": "replicated",
+        "supporting_iterations": list(range(20)),
         "contradicting_iterations": list(range(20)),
         "affected_files": ["model.py" * 30] * 20,
         "effect_range": [-0.01, 0.01], "unresolved": "u" * 1000,
@@ -211,6 +249,61 @@ check("maximal run-end summary stays under MAX_RECORD_BYTES",
 check("run-end summary discloses omitted beliefs",
       run_end["beliefs_omitted"] == 6 and len(run_end["beliefs"]) == 4)
 
+# Reproduce the shape that failed in anthropic_discovery_cont1. The earlier fixture was
+# only 9 KB and therefore never entered the compaction paths that matter.
+oversized_run_end = RD.bounded_run_end_record({
+    "run_id": "anthropic_discovery_cont1", "termination": "budget",
+    "stats": {
+        "planned": 8, "evaluated": 8, "architecture_considered": 24,
+        "candidate_diagnostics": ["long diagnostic " * 300 for _ in range(8)],
+    },
+    "budget": {
+        "tokens_total": 999999, "tokens_total_from_iterations": 999999,
+        "stage_seconds": {f"stage_{i}": 1000.0 + i for i in range(40)},
+        "iteration_wall_seconds": [1000.0 + i for i in range(50)],
+        "remaining": {"tokens": 1, "wall_seconds": 2},
+    },
+    "champion": {"tree": "c" * 64, "primary": 0.604,
+                 "hypothesis": "large champion hypothesis " * 1000},
+    "usage_by_role": {
+        role: {"calls": 20, "input_tokens": 200000, "output_tokens": 100000,
+               "thinking_tokens": 50000, "total_tokens": 350000,
+               "seconds": 1000.0, "retries": 3, "refusals": 1,
+               "truncations": 2, "models": ["claude-opus-5"],
+               "provider_detail": "not needed " * 1000}
+        for role in ("plan", "judge", "code", "reflect")
+    },
+    "lane_stats": {"by_lane": {
+        lane: {"considered": 100, "selected": 30, "executed": 20,
+               "promoted": 2, "notes": "lane detail " * 500}
+        for lane in lanes},
+        "model_py_edits": 3, "train_py_edits": 4,
+        "features_py_edits": 2, "config_json_edits": 5},
+    "beliefs": state_for_summary.beliefs,
+    "hardware_capabilities": {
+        "platform": "platform " * 500, "python": "python " * 500,
+        "torch_available": True, "torch_version": "version " * 500,
+        "cpu": {"available": True, "name": "cpu " * 1000,
+                "reason": "reason " * 1000},
+        "mps": {"available": False, "reason": "reason " * 1000},
+        "cuda": {"available": False, "reason": "reason " * 1000},
+    },
+    "seed_profile": "minimal", "research_policy": "tournament",
+    "search_mode": "discovery", "evidence_class": "diagnostic_discovery",
+    "submittable": False, "execution_profile": {"framework": "auto"},
+    "manual_interventions": [{"what": "none " * 1000, "why": "none " * 1000}],
+})
+oversized_bytes = len(canonical(oversized_run_end))
+check("the real oversized run-end shape compacts below MAX_RECORD_BYTES",
+      oversized_bytes < MAX_RECORD_BYTES,
+      f"{oversized_bytes} < {MAX_RECORD_BYTES}")
+check("run-end compaction preserves the completion and champion identity",
+      oversized_run_end["run_id"] == "anthropic_discovery_cont1"
+      and oversized_run_end["termination"] == "budget"
+      and oversized_run_end["champion"]["tree"] == "c" * 64)
+check("run-end compaction is explicit rather than silent",
+      bool(oversized_run_end.get("run_end_compaction")))
+
 print("== CLI and console launcher keep discovery opt-in")
 parser = RD.build_parser()
 check("research CLI defaults to the standard search path",
@@ -221,6 +314,10 @@ check("research CLI separates per-call output from the run token cap",
       continuation_args.llm_max_output_tokens == 64000)
 check("research CLI accepts an explicit continuation artifact",
       continuation_args.seed_tree == "0" * 64)
+provider_ceiling_args = parser.parse_args([
+    "--llm-max-output-tokens", "128000"])
+check("research CLI accepts Opus 5's synchronous output ceiling",
+      provider_ceiling_args.llm_max_output_tokens == 128000)
 continued_provenance = RD.provenance_for_seed_files("minimal", {
     "model.py": "class FM:\n    def step_bpr(self):\n        pass\n",
     "train.py": "def build_pair_index():\n    pass\n",

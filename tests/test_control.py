@@ -91,7 +91,7 @@ check("research isolation choices agree with the research driver",
 check("research convergence choices agree with the research driver",
       tuple(CL.CONVERGENCE) == tuple(racts["convergence"].choices or ()))
 for flag in ("iterations", "max_wall_seconds", "fit_seconds", "max_repairs",
-             "max_tokens", "model", "thinking_level", "thought_summaries",
+             "max_tokens", "llm_max_output_tokens", "model", "thinking_level", "thought_summaries",
              "task_spec", "seed_config"):
     check(f"the research driver really accepts --{flag.replace('_','-')}", flag in racts)
 check("both drivers are offered by the UI", tuple(CL.DRIVERS) == ("official", "research"))
@@ -109,6 +109,8 @@ try:
 except SystemExit:
     ok_parse = False
 check("the research driver parses the exact argv the UI builds", ok_parse, " ".join(av[4:]))
+check("the UI sends the per-call output ceiling separately from the run budget",
+      av[av.index("--llm-max-output-tokens") + 1] == "64000")
 
 portable = Path(__file__).resolve().parent / "fixtures" / "portable_recommender" / "task.json"
 sp_portable = CL.parse({"driver": "research", "backend": "gemini", "model": "m",
@@ -150,6 +152,8 @@ check("the driver itself does still offer it (so this is the UI's own policy)",
 print("== numeric bounds are cost controls")
 for k, bad in [("iterations", "0"), ("iterations", "201"), ("iterations", "-5"),
                ("max_tokens", "999"), ("max_tokens", "20000001"),
+               ("llm_max_output_tokens", "1023"),
+               ("llm_max_output_tokens", "128001"),
                ("max_seconds", "9"), ("max_seconds", "86401"),
                ("patch_seconds", "3601"), ("epsilon_greedy", "1.1"),
                ("epsilon_greedy", "-0.1"), ("seed", "-1")]:
@@ -170,7 +174,8 @@ check("float given for an int field is truncated, not crashed",
 print("== no exception may escape parse() except LaunchRefused (bug 53)")
 # `cast(float(raw))` ran the int cast BEFORE the finiteness check, so iterations=inf raised
 # OverflowError -- past parse()'s contract and past control.py's `except LaunchRefused`.
-for field in ("iterations", "seed", "max_tokens", "max_seconds", "patch_seconds",
+for field in ("iterations", "seed", "max_tokens", "llm_max_output_tokens",
+              "max_seconds", "patch_seconds",
               "epsilon_greedy"):
     for raw in ("inf", "-inf", "1e400", "-1e400", "nan", "abc", "", "1e", "0x10",
                 "1_000", "+5", " 7 ", "\u0665"):

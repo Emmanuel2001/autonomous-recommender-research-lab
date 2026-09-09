@@ -58,9 +58,10 @@ try:
     from agent.research_agent import (LANES, REQUIRED_LANES, ROLES, ResearchAgent,
                                      anthropic_judge_schema, anthropic_schema,
                                      anthropic_retry_without_fallback,
-                                     code_schema, judge_schema,
+                                     code_prompt, code_schema, judge_schema,
                                      normalize_anthropic_judge, reflect_schema,
                                      tournament_schema)
+    from agent.proposer import ProposerTruncated
     from agent.research_state import ResearchState
     from core.official_data import load_for_strategy
     from core.task import get as get_task
@@ -132,6 +133,19 @@ try:
           [r["id"] for r in normalized["ranking"]] == ["F1", "M1"]
           and normalized["architecture_verdicts"] == [{
               "candidate_id": "M1", "verdict": "selected", "reason": "test reason"}])
+
+    _repair_system, repair_user = code_prompt(
+        {"hypothesis": "LightGBM LambdaRank", "lane": "model_architecture"},
+        {"train.py": "def fit_predict(data, params):\n    pass\n"},
+        {"phase": "static_validation", "error_type": "CandidateError",
+         "error": "train.py line 9: executable code references 'heldout.label'"},
+        1, {"task": {"name": "test"}})
+    check("the held-out repair prompt preserves the hypothesis and gives exact split rules",
+          "LightGBM LambdaRank" in repair_user
+          and "MANDATORY HELD-OUT REPAIR" in repair_user
+          and "Build held-out X" in repair_user
+          and "Do not weaken" in repair_user
+          and "evade the validator" in repair_user)
 
     seed = dict(CAND.seed_tree(WS))
     cfg = json.loads(seed["config.json"]); cfg.update(epochs=1, patience=1)
@@ -250,7 +264,7 @@ try:
                     "remaining_uncertainty": "scripted",
                     "belief_updates": [{
                         "mechanism": f"{lane} mechanism", "lane": lane,
-                        "belief": "no gain observed", "confidence": 0.6,
+                        "belief": "no gain observed", "llm_confidence": 0.6,
                         "supports": False, "affected_files": plan.get("files_to_change"),
                         "effect_low": -0.002, "effect_high": 0.001,
                         "unresolved": "untested at higher capacity",
@@ -385,7 +399,8 @@ try:
     check("beliefs are keyed by mechanism", all("mechanism" in b for b in
                                                 state.beliefs.values()))
     b0 = next(iter(state.beliefs.values()))
-    for f in ("lane", "confidence", "supporting_iterations", "contradicting_iterations",
+    for f in ("lane", "llm_confidence", "evidence_grade", "supporting_iterations",
+              "contradicting_iterations",
               "affected_files", "effect_range", "unresolved", "retry_only_if",
               "last_updated_iteration"):
         check(f"a belief carries {f}", f in b0, str(sorted(b0)))
@@ -649,6 +664,107 @@ try:
           and trunc_errors[0]["payload"]["body"]["llm_call"]["output_tokens"] == 32000)
     check("a truncated coder response never reaches candidate training",
           trunc_out["stats"]["evaluated"] == 0)
+
+    class RecoveringTruncatingCoder(FakeAgent):
+        """First code call truncates; the bounded automatic repair completes it."""
+        def __init__(self):
+            super().__init__(["M1"])
+            self.code_attempts = 0
+            self.retry_error = None
+
+        def code(self, plan, parent_source, state, error=None, attempt=0):
+            self.code_attempts += 1
+            if self.code_attempts == 1:
+                u = {
+                    "role": "code", "backend": "anthropic", "model": "test-opus",
+                    "input_tokens": 123, "output_tokens": 64000,
+                    "thinking_tokens": 0, "total_tokens": 64123, "seconds": 2.0,
+                    "retries": 0, "refused": False, "truncated": True,
+                    "stop_reason": "max_tokens",
+                }
+                self.usage.append(u)
+                raise ProposerTruncated("scripted truncation", u)
+            self.retry_error = error
+            return super().code(plan, parent_source, state, error, attempt)
+
+    recovering = RecoveringTruncatingCoder()
+    recovering_budget = BUD.Budget(max_iterations=1, max_wall_seconds=1800,
+                                   max_tokens=100000)
+    recovering_state = ResearchState({"name": "kuairand_pure"}, {})
+    recovering_root = SCRATCH / "coder_truncation_repair"
+    shutil.rmtree(recovering_root, ignore_errors=True)
+    recovering_out = RD.research_loop(
+        agent=recovering, splits=splits, edges=edges, spec=spec,
+        state=recovering_state, budget=recovering_budget,
+        run_id="coder_truncation_repair", rec=rec, score=score,
+        run_root=recovering_root, backend="none", max_seconds=900,
+        convergence="off", max_repairs=1, verbose=False, seed_files=seed,
+        policy="tournament", tournament_size=6, workspace=WS)
+    check("a truncated code call is retried within the same iteration",
+          recovering.code_attempts == 2, str(recovering.code_attempts))
+    check("the truncation error is supplied to the retry",
+          (recovering.retry_error or {}).get("error_type") == "ProposerTruncated",
+          str(recovering.retry_error))
+    check("a completed truncation retry reaches candidate training",
+          recovering_out["stats"]["evaluated"] == 1,
+          str(recovering_out["stats"]))
+    check("the failed call and successful retry both count against the token budget",
+          recovering_out["budget"]["tokens_total"] >= 64443,
+          str(recovering_out["budget"]["tokens_total"]))
+
+    class RecoveringHeldoutCoder(FakeAgent):
+        """First tree mentions heldout.label; repair keeps the hypothesis and removes it."""
+        def __init__(self):
+            super().__init__(["M1"])
+            self.code_attempts = 0
+            self.retry_error = None
+
+        def code(self, plan, parent_source, state, error=None, attempt=0):
+            self.code_attempts += 1
+            if self.code_attempts == 1:
+                bad = seed["train.py"] + ("\n\ndef forbidden_probe(heldout):\n"
+                                           "    return heldout.label\n")
+                return {"reasoning": "scripted unsafe grouped helper",
+                        "files": [
+                            {"path": "model.py", "content": ARCH_MODEL},
+                            {"path": "train.py", "content": bad},
+                        ]}, self._u("code")
+            self.retry_error = error
+            return super().code(plan, parent_source, state, error, attempt)
+
+    heldout_agent = RecoveringHeldoutCoder()
+    heldout_budget = BUD.Budget(max_iterations=1, max_wall_seconds=1800,
+                                max_tokens=100000)
+    heldout_state = ResearchState({"name": "kuairand_pure"}, {})
+    heldout_root = SCRATCH / "heldout_static_repair"
+    shutil.rmtree(heldout_root, ignore_errors=True)
+    heldout_before = len(LEDGER_PATH.read_text().splitlines())
+    heldout_out = RD.research_loop(
+        agent=heldout_agent, splits=splits, edges=edges, spec=spec,
+        state=heldout_state, budget=heldout_budget,
+        run_id="heldout_static_repair", rec=rec, score=score,
+        run_root=heldout_root, backend="none", max_seconds=900,
+        convergence="off", max_repairs=1, verbose=False, seed_files=seed,
+        policy="tournament", tournament_size=6, workspace=WS)
+    heldout_entries = [json.loads(line) for line in
+                       LEDGER_PATH.read_text().splitlines()[heldout_before:]
+                       if line.strip()]
+    heldout_refusals = [e for e in heldout_entries
+                        if (e["payload"].get("body") or {}).get("what")
+                        == "candidate_refused"]
+    check("a held-out-label static refusal is signed before repair",
+          len(heldout_refusals) == 1
+          and "train.py line " in heldout_refusals[0]["payload"]["body"]["error"])
+    check("the exact held-out refusal and previous source reach the coder retry",
+          (heldout_agent.retry_error or {}).get("phase") == "static_validation"
+          and "heldout.label" in (heldout_agent.retry_error or {}).get("error", "")
+          and bool((heldout_agent.retry_error or {}).get("your_previous_attempt")),
+          str(heldout_agent.retry_error))
+    check("the repaired candidate passes validation and reaches training",
+          heldout_agent.code_attempts == 2
+          and heldout_out["stats"]["repaired"] == 1
+          and heldout_out["stats"]["evaluated"] == 1,
+          str(heldout_out["stats"]))
 
     # -- the per-iteration cost RECORDED IN THE LEDGER must carry a real wall time.
     # This is the assertion that was missing: the old one read budget.costs after the loop,

@@ -1874,6 +1874,19 @@ def build_parser() -> argparse.ArgumentParser:
                          "compatible conclusions, failures and dedup history from the "
                          "lineage named by --memory-from; import carries only compatible "
                          "beliefs and reflections")
+    ap.add_argument(
+        "--evidence-from", action="append", default=None, metavar="LEDGER",
+        help="import verified signed evidence from this ledger. Repeatable. Import is "
+             "NEVER implicit: without this flag a run starts with no imported "
+             "observations. The driver holds no signing key, so the ledger is verified "
+             "by the scorer, which returns a bounded whitelisted bundle; deltas and "
+             "confirmations are then recomputed from the signed score records.")
+    ap.add_argument(
+        "--evidence-allow-legacy", action="store_true",
+        help="permit import from a ledger predating the data-contract fields, through "
+             "the explicit legacy adapter. Every authoritative fact that ledger DID "
+             "record (task, label, metric, split content hash) must match exactly; "
+             "nothing missing is invented, and the adapter's use is recorded.")
     ap.add_argument("--memory-from", default=None,
                     help="state.json from a previous versioned, compatible research run")
     ap.add_argument("--research-policy", default="tournament",
@@ -2154,6 +2167,38 @@ def main() -> None:
             return False, str(e)
         return True, pl
 
+    # ---- verified evidence import. Explicit, key-free, and recorded before any LLM
+    # call: the planner must never see imported evidence that run_start does not disclose.
+    evidence_summary = None
+    if a.evidence_from:
+        # The CURRENT split manifest, built from the data this run actually loaded --
+        # never copied from the ledger being judged. Row counts and content hashes come
+        # from the loaded splits; the workspace contract hash from the workspace on disk.
+        # A missing value stays missing: the legacy adapter refuses rather than assumes.
+        current_splits = {
+            name: {"rows": len(splits[name]),
+                   "content_sha256": splits[name].content_sha256()}
+            for name in ("train", dev, held) if name in splits}
+        scope = {**state.compatibility(state.task),
+                 "workspace_contract_sha256": workspace_contract_sha256,
+                 "splits": current_splits,
+                 "split_content_sha256": splits[dev].content_sha256()}
+        r = request({"op": "evidence", "ledgers": list(a.evidence_from)})
+        if not r.get("ok"):
+            raise SystemExit(f"the scorer refused the evidence request: {r.get('error')}")
+        observations, evidence_summary = EVID.ingest_bundle(
+            r["bundle"], current_scope=scope, reader=AR.read,
+            allow_legacy=a.evidence_allow_legacy)
+        for obs in observations:
+            state.note_observation(obs)
+        evidence_summary["requested"] = list(a.evidence_from)
+        print(f"[research] evidence: {evidence_summary['observations_imported']} "
+              f"observation(s) imported, {evidence_summary['observations_rejected']} "
+              f"rejected, {evidence_summary['confirmations_recomputed']} confirmation(s) "
+              f"recomputed via {evidence_summary['compatibility_method']}")
+        for d in evidence_summary["confirmation_discrepancies"][:3]:
+            print(f"[research]   DISCREPANCY seq {d.get('seq')}: {d.get('discrepancies')}")
+
     ok, seq = rec("run_start", {
         "run_id": run_id, "task": spec.slug, "driver": "research_driver",
         "task_spec_path": str(Path(a.task_spec).resolve()) if a.task_spec else None,
@@ -2189,6 +2234,11 @@ def main() -> None:
         "convergence": {"epsilon": float(spec.convergence.get("epsilon", OFFICIAL_EPSILON)),
                         "N": int(spec.convergence.get("N", OFFICIAL_N)),
                         "mode": a.convergence},
+        # BOUNDED before it enters the signed body. run_start is already the largest
+        # routine record this project writes, and an unbounded import summary -- eight
+        # ledgers, thousands of sequences -- would push it past the 12,288-byte cap and
+        # abandon the run before the first LLM call.
+        "evidence_import": EVID.bounded_evidence_summary(evidence_summary, root=ROOT),
         "started_epoch": t0})
     if not ok:
         raise SystemExit(f"could not record run_start: {seq}")

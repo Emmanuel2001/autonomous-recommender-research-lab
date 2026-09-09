@@ -443,6 +443,212 @@ def _isolation_available() -> dict:
         return {"error": f"{type(e).__name__}: {e}"}
 
 
+# ------------------------------------------------------------------ evidence bundles
+#: Directories a client may ask the scorer to read evidence from. Anything else is
+#: refused outright: the scorer holds the signing key, so "verify this path for me" is a
+#: capability, and a capability with an unbounded path argument is a file-read oracle.
+EVIDENCE_DIRS = (_RUNS / "ledgers",)
+#: Bounds on one evidence request. A caller cannot make the key-holding process read an
+#: arbitrary amount of disk, nor return an unbounded bundle over the socket.
+EVIDENCE_MAX_LEDGERS = 8
+EVIDENCE_MAX_BYTES = 8 * 1024 * 1024
+EVIDENCE_MAX_ENTRIES = 4000
+#: Exactly the fields that may leave this process per record kind. A whitelist, because a
+#: blacklist silently leaks whatever a future record adds.
+EVIDENCE_FIELDS = {
+    "run_start": ("run_id", "task", "task_spec_path", "backend", "model", "seed_profile",
+                  "contract_sha256", "data_contract_sha256", "dataset_fingerprint",
+                  "search_mode", "evidence_class", "research_policy", "started_epoch"),
+    "score": ("config_hash", "split", "metrics", "scores_sha256",
+              "split_content_sha256", "label", "metric", "n_rows", "n_users", "task"),
+    "confirmation": ("config_hash", "split", "metrics", "scores_sha256",
+                     "split_content_sha256", "label", "metric", "n_rows", "n_users",
+                     "seed", "task"),
+    "candidate_proposal": ("run_id", "iteration", "attempt", "tree", "parent_tree",
+                           "files_changed", "diff_hash", "diff_bytes", "hypothesis",
+                           "mechanism", "lane", "contract_sha256"),
+    "confirmation_protocol": ("champion_tree", "comparison_tree", "comparison", "seeds",
+                              "seed_start", "method", "run_id"),
+    "confirmation_result": ("champion_tree", "comparison_tree", "comparison", "seeds",
+                            "n", "mean", "sd", "se", "t", "wins", "verdict", "method",
+                            "run_id", "per_seed"),
+}
+
+
+#: Exactly the manifest fields that may leave this process. The genesis manifest is an
+#: arbitrary nested object written by whatever produced the ledger; returning it whole
+#: would make the evidence op a general reader of unvetted structure.
+MANIFEST_SPLIT_FIELDS = ("rows", "content_sha256")
+MANIFEST_FIELDS = ("task", "label", "metric")
+
+#: Set by serve() so a bundle can carry the running scorer's own manifest facts.
+_CURRENT_MANIFEST: dict | None = None
+_CURRENT_MANIFEST_SHA: str | None = None
+
+
+def _sanitise_manifest(manifest, manifest_sha256=None) -> dict | None:
+    """Narrow a manifest to declared scalar facts. Never returns nested unknown structure."""
+    if not isinstance(manifest, dict):
+        return None
+    splits = {}
+    for name, info in (manifest.get("splits") or {}).items():
+        if not isinstance(info, dict):
+            continue
+        rows, digest = info.get("rows"), info.get("content_sha256")
+        if rows is None or digest is None:
+            continue
+        splits[str(name)] = {"rows": int(rows), "content_sha256": str(digest)}
+    out = {k: manifest.get(k) for k in MANIFEST_FIELDS if manifest.get(k) is not None}
+    out["splits"] = splits
+    if manifest_sha256:
+        out["manifest_sha256"] = str(manifest_sha256)
+    return out
+
+
+class EvidenceRefused(ScoringError):
+    """An evidence request the key-holding process will not serve."""
+
+
+def _evidence_path(name: str) -> Path:
+    """Resolve a requested ledger to an approved, non-symlink, regular file.
+
+    Containment is checked after resolution so `a/../../b` cannot slip past, and the
+    unresolved path is checked for symlink components so a link INSIDE an approved
+    directory cannot point outside it.
+    """
+    raw = Path(str(name))
+    resolved = raw.resolve()
+    for approved in EVIDENCE_DIRS:
+        root = approved.resolve()
+        # Check for links BEFORE resolving the final component. A link inside an
+        # approved directory pointing outside it would otherwise be refused for escaping
+        # containment -- the right outcome reached by the wrong rule, which would stop
+        # catching a link that points somewhere still inside the directory.
+        #
+        # `raw.parent.resolve() / raw.name` collapses the directory prefix (on macOS
+        # /var is itself a link to /private/var, so an unresolved prefix never matches
+        # the resolved root) while leaving the final component unfollowed.
+        probe_path = raw.parent.resolve() / raw.name
+        try:
+            parts = probe_path.relative_to(root).parts
+        except ValueError:
+            parts = ()
+        walked = root
+        for part in parts:
+            walked = walked / part
+            if walked.is_symlink():
+                raise EvidenceRefused(
+                    f"evidence path {name!r} traverses a symlink inside an approved "
+                    f"directory ({walked.name})")
+        try:
+            rel = resolved.relative_to(root)
+        except ValueError:
+            continue
+        # Symlinks are checked only BELOW the approved root. Checking every ancestor
+        # would reject any legitimate path whose system prefix is itself a link -- on
+        # macOS /var is a symlink to /private/var, so that rejected every temp dir. The
+        # threat is a link INSIDE an approved directory pointing somewhere else, and
+        # that is exactly what this walk catches.
+        walked = root
+        for part in rel.parts:
+            walked = walked / part
+            if walked.is_symlink():
+                raise EvidenceRefused(
+                    f"evidence path {name!r} traverses a symlink inside an approved "
+                    f"directory ({walked.name})")
+        if not resolved.is_file():
+            raise EvidenceRefused(f"evidence path {name!r} is not a regular file")
+        return resolved
+    raise EvidenceRefused(
+        f"evidence path {name!r} is outside the approved ledger directories "
+        f"{[str(d) for d in EVIDENCE_DIRS]}")
+
+
+def evidence_bundle(names, key: bytes) -> dict:
+    """Verify each requested ledger with the SCORER's key and return a bounded bundle.
+
+    The research driver never holds the signing key, so it cannot verify a ledger itself
+    and must not be trusted to report that it did. It asks here instead, and what comes
+    back is whitelisted per record kind -- signed facts a caller can recompute from, never
+    whole payloads.
+
+    An unverifiable ledger yields no records at all. A chain that fails is not partially
+    usable: the point of the signature is that a reader cannot tell which entries an
+    attacker touched.
+    """
+    requested = [str(n) for n in (names or [])]
+    if not requested:
+        raise EvidenceRefused("no evidence ledger requested")
+    if len(requested) > EVIDENCE_MAX_LEDGERS:
+        raise EvidenceRefused(
+            f"{len(requested)} ledgers requested; the limit is {EVIDENCE_MAX_LEDGERS}")
+    out, total_bytes, total_entries = [], 0, 0
+    for name in requested:
+        path = _evidence_path(name)
+        size = path.stat().st_size
+        total_bytes += size
+        if total_bytes > EVIDENCE_MAX_BYTES:
+            raise EvidenceRefused(
+                f"evidence request exceeds {EVIDENCE_MAX_BYTES} bytes at {path.name}")
+        raw = path.read_bytes()
+        result = verify(path, key)
+        # VerifyResult.ok is the authority. The previous check searched str(result) for
+        # "OK", which is a rendering, not a result: an error message that merely CONTAINS
+        # those letters would have passed a tampered ledger. Never parse a __str__.
+        ok = bool(getattr(result, "ok", False))
+        record = {"ledger": str(path), "sha256": hashlib.sha256(raw).hexdigest(),
+                  "verified": ok, "entries": 0, "records": [],
+                  "verified_entries": int(getattr(result, "n_verified", 0) or 0),
+                  "incomplete_tail": bool(getattr(result, "incomplete_tail", False)),
+                  "verify_error": (None if ok else str(getattr(result, "error", "") or
+                                                       "verification failed")),
+                  "bad_seq": getattr(result, "bad_seq", None),
+                  "genesis_manifest": None}
+        if not ok:
+            record["refused"] = "ledger did not verify against the scorer's key"
+            out.append(record)
+            continue
+        for line in raw.decode("utf-8", "replace").splitlines():
+            if not line.strip():
+                continue
+            try:
+                entry = json.loads(line)
+            except ValueError:
+                continue
+            payload = entry.get("payload") or {}
+            body = payload.get("body") or {}
+            kind = str(payload.get("kind") or "")
+            what = str(body.get("what") or "")
+            source = body if body else payload
+            fields = EVIDENCE_FIELDS.get(what) or EVIDENCE_FIELDS.get(kind)
+            record["entries"] += 1
+            total_entries += 1
+            if total_entries > EVIDENCE_MAX_ENTRIES:
+                raise EvidenceRefused(
+                    f"evidence request exceeds {EVIDENCE_MAX_ENTRIES} entries")
+            if kind == "genesis" and record["genesis_manifest"] is None:
+                record["genesis_manifest"] = _sanitise_manifest(
+                    payload.get("manifest"), payload.get("manifest_sha256"))
+            if not fields:
+                continue
+            picked = {k: source.get(k) for k in fields if source.get(k) is not None}
+            if not picked:
+                continue
+            record["records"].append({"seq": entry.get("seq"),
+                                      "kind": what or kind, **picked})
+        out.append(record)
+    return {"ledgers": out,
+            # The running scorer's OWN manifest, sanitised the same way. The driver
+            # cannot invent the scorer-side task name, and copying it out of the ledger
+            # being judged would make the comparison circular.
+            "current_manifest": _sanitise_manifest(_CURRENT_MANIFEST,
+                                                   _CURRENT_MANIFEST_SHA),
+            "limits": {"max_ledgers": EVIDENCE_MAX_LEDGERS,
+                       "max_bytes": EVIDENCE_MAX_BYTES,
+                       "max_entries": EVIDENCE_MAX_ENTRIES},
+            "approved_dirs": [str(d) for d in EVIDENCE_DIRS]}
+
+
 def serve(include_quarantine: bool = False, allow_broken_chain: bool = False,
           task: str = "official", task_spec: str | None = None) -> None:
     """task="official" -> the CURRENT task (GAUC/nDCG@5, within-user, long_view).
@@ -523,6 +729,11 @@ def serve(include_quarantine: bool = False, allow_broken_chain: bool = False,
         manifest_sha = hashlib.sha256(canonical(manifest)).hexdigest()
     else:
         manifest, manifest_sha = view.manifest, view.manifest_sha256
+
+    # Publish the running scorer's own manifest facts for the evidence op. Module-level
+    # so evidence_bundle can reach them without threading a parameter through serve().
+    global _CURRENT_MANIFEST, _CURRENT_MANIFEST_SHA
+    _CURRENT_MANIFEST, _CURRENT_MANIFEST_SHA = manifest, manifest_sha
     led.append({"kind": "genesis", "ts_utc": datetime.now(timezone.utc).isoformat(timespec="seconds"),
                 "task": task,
                 "manifest_sha256": manifest_sha, "manifest": manifest,
@@ -635,6 +846,17 @@ def serve(include_quarantine: bool = False, allow_broken_chain: bool = False,
                         b = entry["payload"]["body"]
                         print(f"  seq={entry['seq']:>4} {entry['payload']['kind'].upper():10s} "
                               + str(b.get("action_type") or b.get("what") or "")[:48])
+                    elif op == "evidence":
+                        # The driver holds no key, so it cannot verify a ledger and must
+                        # not be believed if it says it did. It asks the key holder.
+                        resp = {"ok": True,
+                                "bundle": evidence_bundle(req.get("ledgers"), key)}
+                        n = sum(len(l["records"]) for l in resp["bundle"]["ledgers"])
+                        bad = [l["ledger"] for l in resp["bundle"]["ledgers"]
+                               if not l["verified"]]
+                        print(f"  evidence: {len(resp['bundle']['ledgers'])} ledger(s), "
+                              f"{n} whitelisted record(s)"
+                              + (f"  REFUSED (unverified): {bad}" if bad else ""))
                     elif op == "ping":
                         # must not touch `view`: it is None when task=official, and a
                         # failing ping made the driver report "scorer not reachable"

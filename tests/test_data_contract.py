@@ -96,6 +96,72 @@ check("invented columns are refused before coding",
 check("missing declarations are refused",
       bool(DC.candidate_column_problems({"id": "missing"}, contract)))
 
+print()
+print("== D1: the label and the auxiliary outcomes are declarable, held-out never is")
+
+
+def decl(*names):
+    return {"id": "d", "data_columns": list(names)}
+
+
+avail = DC.declarable_names(contract)
+check("the training label is declarable",
+      DC.candidate_column_problems(decl("user_id", "long_view"), contract) == [],
+      str(DC.candidate_column_problems(decl("user_id", "long_view"), contract)))
+check("the label is declarable on train and dev only",
+      set(avail["long_view"]) == {"train", "valid"}, str(avail["long_view"]))
+aux_names = [a["name"] for a in contract["auxiliary_training_outcomes"]]
+check("every published auxiliary outcome is declarable",
+      aux_names and all(DC.candidate_column_problems(decl("user_id", n), contract) == []
+                        for n in aux_names), str(aux_names))
+check("an auxiliary outcome is declarable on its own split",
+      DC.candidate_column_problems(decl("train:secondary"), contract) == [])
+check("an auxiliary outcome is REFUSED on a split that does not carry it",
+      any("available on ['train'] only" in p
+          for p in DC.candidate_column_problems(decl("valid:secondary"), contract)),
+      str(DC.candidate_column_problems(decl("valid:secondary"), contract)))
+check("a feature is declarable on any split that carries it",
+      DC.candidate_column_problems(decl("test:temperature"), contract) == [])
+held = DC.candidate_column_problems(decl("test:long_view"), contract)
+check("held-out label values are refused however they are qualified",
+      held and "never visible to the agent" in held[0], str(held))
+check("the held-out alias is refused too",
+      bool(DC.candidate_column_problems(decl("heldout:long_view"), contract)))
+check("no declarable name carries the held-out split's labels",
+      "test" not in avail["long_view"])
+invented = DC.candidate_column_problems(decl("onehot_feat3"), contract)
+check("invented and unjoined columns are still refused", bool(invented))
+check("the refusal names the declarable surfaces so a repair can succeed",
+      "the label" in invented[0] and "auxiliary outcomes" in invented[0], invented[0])
+check("an unknown split qualifier is refused explicitly",
+      any("unknown split" in p
+          for p in DC.candidate_column_problems(decl("holdout2:user_id"), contract)),
+      str(DC.candidate_column_problems(decl("holdout2:user_id"), contract)))
+check("the Gate 2 false refusal of the task's own label is gone",
+      not any("absent from the loader contract" in p
+              for p in DC.candidate_column_problems(decl("long_view"), contract)))
+
+print()
+print("== D1: the declaration is not the boundary -- executable source still is")
+from agent import candidate as CAND
+
+seed = CAND.seed_tree(CAND.workspace_for("minimal"))
+leaky = dict(seed)
+leaky["train.py"] = seed["train.py"].replace(
+    "def fit_predict(", "def fit_predict(", 1) + "\n\ndef _peek(data):\n    return data.heldout.label\n"
+try:
+    CAND.validate_tree(leaky, CAND.workspace_for("minimal"))
+    refused = ""
+except CAND.CandidateError as exc:
+    refused = str(exc)
+check("candidate source reading heldout.label is refused by the static validator",
+      "heldout.label" in refused, refused[:120])
+check("declaring the label in a hypothesis does NOT let source read held-out labels",
+      DC.candidate_column_problems(decl("long_view"), contract) == []
+      and "heldout.label" in refused)
+check("the held-out split carries no label values at all",
+      splits["test"].label is None)
+
 portable = load(ROOT / "tests" / "fixtures" / "portable_recommender" / "task.json")
 portable_splits, _ = portable.loader()
 portable_contract = DC.build(portable, portable_splits)

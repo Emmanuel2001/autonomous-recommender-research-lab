@@ -96,9 +96,15 @@ def _hypothesis_properties() -> dict:
         "files_to_change": {"type": "array", "items": {"type": "string"}},
         "data_columns": {
             "type": "array", "items": {"type": "string"},
-            "description": "Raw loader columns this experiment will read. Use exact "
-                           "names from task.data.columns. Generated features belong in "
-                           "derived_features, not here."},
+            "description": "Exact raw names this experiment reads, from THREE published "
+                           "surfaces: feature columns in task.data.columns; the training "
+                           "label task.data.label.name, available on the splits in its "
+                           "visible_on (train and dev) and never on held-out; and the "
+                           "train-only names in task.data.auxiliary_training_outcomes. "
+                           "Optionally qualify an entry as 'split:name' (e.g. "
+                           "'train:is_click') to state which split you read it on. "
+                           "Declaring a name does NOT override its split availability. "
+                           "Computed quantities belong in derived_features, not here."},
         "derived_features": {
             "type": "array", "items": {"type": "string"},
             "description": "Features computed only from declared loader columns."},
@@ -294,7 +300,11 @@ def plan_schema() -> dict:
                                       "earlier candidate to fork instead."},
             "files_to_change": {"type": "array", "minItems": 1, "maxItems": 8,
                                 "items": {"type": "string"}},
-            "data_columns": {"type": "array", "items": {"type": "string"}},
+            "data_columns": {
+                "type": "array", "items": {"type": "string"},
+                "description": "Raw names the code reads: task.data.columns, the label "
+                               "on its visible_on splits, or a train-only auxiliary "
+                               "outcome. Optionally 'split:name'."},
             "derived_features": {"type": "array", "items": {"type": "string"}},
             "personalization": {
                 "type": "string",
@@ -423,7 +433,12 @@ RULES THAT ARE ENFORCED, NOT ADVISORY
   * `task.data` is the authoritative loader contract. It describes what candidate code can
     actually read, not every file in the raw dataset directory. Declare exact raw inputs in
     `data_columns`; invented names are refused before coding. Contract facts override any
-    conflicting LLM-authored belief.
+    conflicting LLM-authored belief. Three surfaces are declarable: `data.columns` (the
+    feature columns, with their `available_on` splits), `data.label.name` (available on
+    `data.label.visible_on` -- train and dev -- and required by any ranking objective),
+    and `data.auxiliary_training_outcomes` (TRAIN ONLY). An entry may be written
+    `split:name` to state which split you read it on; that qualifier can only be refused,
+    never used to widen access, and declaring a name never overrides its availability.
   * You may edit only these files: {_mutable()}. contract.py is immutable and a tree
     containing it is refused.
   * The held-out split's labels are not in the process. Executable candidate source must
@@ -541,9 +556,12 @@ negative result removes a whole direction from future consideration.
 Read `beliefs` before proposing. If a candidate revisits a mechanism already recorded as
 unhelpful, `novelty_vs_history` must say what has materially changed -- otherwise do not
 propose it. For every candidate, fill `data_columns` with exact names from the authoritative
-loader contract and put computed quantities in `derived_features`. If the task declares
-personalization required, either describe the real user-conditioned pathway or explicitly
-mark the experiment `non_personalized_ablation`."""
+loader contract -- feature columns, the training label (available on train and dev, and
+required by any pairwise or listwise objective), or a TRAIN-ONLY auxiliary outcome -- and
+put computed quantities in `derived_features`. Held-out label values do not exist in this
+process; no declaration makes them readable. If the task declares personalization required,
+either describe the real user-conditioned pathway or explicitly mark the experiment
+`non_personalized_ablation`."""
     discovery = (state.get("budget", {}).get("search_mode") == "discovery")
     if discovery:
         user += """

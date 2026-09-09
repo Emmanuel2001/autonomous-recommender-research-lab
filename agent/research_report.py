@@ -39,6 +39,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 
 from agent import charts as CH
+from agent import tournament_view as TV
 from agent.official_report import CSS, _card, _num, _table, esc
 from core import artifacts as AR
 from core.metrics import OFFICIAL_EPSILON, OFFICIAL_FM_SEED_STD, OFFICIAL_VALID
@@ -342,7 +343,8 @@ def _sec_tournaments(r: dict) -> str:
     experiment, and this section is the only place the two are shown together, so a reader
     can see breadth of reasoning without mistaking it for breadth of results.
     """
-    ts = sorted(r["tournaments"], key=lambda x: x.get("iteration", 0))
+    ts = TV.hydrate_all(sorted(r["tournaments"], key=lambda x: x.get("iteration", 0)),
+                        r.get("tournament_proposals") or [])
     if not ts:
         ts = sorted(r.get("tournament_proposals") or [],
                     key=lambda x: x.get("iteration", 0))
@@ -369,9 +371,15 @@ def _sec_tournaments(r: dict) -> str:
                 f"<td class=wrap>{esc(str(c.get('information_value'))[:90])}</td>"
                 f"<td>{'<b>EVALUATED</b>' if sel else 'considered only'}</td></tr>")
         bad = cov.get("missing_required_lanes") or []
+        gap = TV.unavailable_note(t)
+        hyd = t.get("_hydration") or {}
         out.append(
             f"<h3>Iteration {t.get('iteration')} &middot; {len(rows)} candidates "
-            f"&middot; recorded at seq {t.get('_seq')}</h3>"
+            f"&middot; recorded at seq {t.get('_seq')}"
+            + (f" &middot; candidates from seq {hyd.get('proposal_seq')}"
+               if hyd.get("state") == "resolved" else "")
+            + "</h3>"
+            + (f"<div class='note warn'><b>{esc(gap)}</b></div>" if gap else "")
             + (f"<div class='note warn'><b>Lane coverage incomplete:</b> no candidate in "
                f"{esc(bad)}. Recorded rather than hidden &mdash; this run cannot claim to "
                f"have considered those lanes at this iteration.</div>" if bad else "")
@@ -483,10 +491,12 @@ def _sec_breadth(d: dict) -> str:
         if prov:
             (prebuilt if prov.get("pairwise_code_present") else agent_written).append(rid)
         for t in r["tournaments"]:
-            for c in (t.get("candidates") or []):
-                lanes_considered[c.get("lane")] = lanes_considered.get(c.get("lane"), 0) + 1
-                if c.get("lane") == "model_architecture":
-                    arch_considered += 1
+            # candidate_refs keeps id+lane precisely so this survives compaction; reading
+            # only `candidates` made these counters silently report zero on new ledgers.
+            for lane, k in TV.lane_counts(t).items():
+                lanes_considered[lane] = lanes_considered.get(lane, 0) + k
+                if lane == "model_architecture":
+                    arch_considered += k
         for x in r["results"]:
             lane = x.get("lane") or "unspecified"
             lanes_run[lane] = lanes_run.get(lane, 0) + 1

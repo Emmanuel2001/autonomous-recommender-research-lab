@@ -37,6 +37,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 from agent import console_ui as UI
+from agent import tournament_view as TV
 from agent import control_launch as CL
 from agent.official_report import CSS, build as build_report, is_official, load as load_ledger
 
@@ -112,6 +113,12 @@ def research_events(entries: list[dict], after: int = -1) -> list[dict]:
     hypotheses, judge rationales and reflections are labelled LLM-authored.  The UI must
     not turn commentary into evidence merely by drawing it in the same colour.
     """
+    proposed_records = []
+    for x in entries:
+        b = (x.get("payload") or {}).get("body") or {}
+        if b.get("what") == "tournament_proposed":
+            proposed_records.append({"seq": x.get("seq"), **b})
+
     out = []
     for x in entries:
         seq = x.get("seq")
@@ -144,16 +151,26 @@ def research_events(entries: list[dict], after: int = -1) -> list[dict]:
                                for c in cs],
                 "coverage": body.get("coverage")}
         elif what == "tournament":
-            cs = body.get("candidates") or []
+            # The decision record is compact: its candidate prose lives in the
+            # tournament_proposed record it names. Resolve it for the timeline, and say so
+            # when it cannot be resolved rather than showing an empty decision.
+            view = TV.hydrate(dict(body), proposed_records)
+            cs = view.get("candidates") or []
             chosen = body.get("selected_id")
+            considered = (body.get("candidates_considered")
+                          or len(body.get("candidate_refs") or []) or len(cs))
             event.update(origin="LLM decision",
-                         title=f"Hypothesis tournament · {len(cs)} considered",
+                         title=f"Hypothesis tournament · {considered} considered",
                          summary=f"Judge selected {chosen}; one candidate will be evaluated")
             event["detail"] = {
                 "candidates": [{k: c.get(k) for k in
                                 ("id", "lane", "hypothesis", "files_to_change")}
                                for c in cs],
-                "judge": body.get("judge"), "selected": chosen}
+                "judge": body.get("judge"), "selected": chosen,
+                "proposal_seq": body.get("proposal_seq")}
+            gap = TV.unavailable_note(view)
+            if gap:
+                event["detail"]["candidates_unavailable"] = gap
         elif kind == "proposal" and what == "candidate_proposal":
             event.update(origin="LLM hypothesis · harness-registered",
                          title="Candidate pre-registered",

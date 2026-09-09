@@ -28,6 +28,8 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 
+from agent import tournament_view as TV  # noqa: E402
+
 
 def esc(x) -> str:
     return html.escape(str(x if x is not None else ""))
@@ -541,12 +543,19 @@ NO_SUMMARY = ("Provider returned no public thought summary for this call. The st
 
 
 def _cand_cards(t: dict) -> str:
+    """Render one tournament. `t` must already be hydrated (see agent.tournament_view)."""
     judge = t.get("judge") or t.get("verdict") or {}
     sel = judge.get("selected_id")
     ranks = {r.get("id"): r for r in (judge.get("ranking") or []) if isinstance(r, dict)}
     archv = {a.get("candidate_id"): a for a in (judge.get("architecture_verdicts") or [])}
     cands = t.get("candidates") or []
     if not cands:
+        gap = TV.unavailable_note(t)
+        if gap:
+            # An unresolved decision is an evidence gap, not an empty tournament. Saying
+            # so is the whole point: the alternative is a blank board that reads like the
+            # agent proposed nothing.
+            return f"<div class='empty warn'>{esc(gap)}</div>"
         return "<div class=empty>No tournament candidates recorded for this iteration.</div>"
     ordered = sorted(cands, key=lambda c: (ranks.get(c.get("id"), {}).get("rank") or 99))
     out = []
@@ -589,7 +598,8 @@ def view_live(d: dict) -> str:
         return ("<div class=empty>No research iteration has been recorded in this ledger "
                 "yet. The timeline appears once a tournament is registered.</div>")
     it = d["iterations"][-1] if d["iterations"] else {}
-    t = (d["tournaments"][-1] if d["tournaments"] else
+    t = (TV.hydrate(d["tournaments"][-1], d["tournament_proposals"])
+         if d["tournaments"] else
          d["tournament_proposals"][-1] if d["tournament_proposals"] else {})
     prop = next((p for p in d["proposals"] if p.get("iteration") == it.get("iteration")), {})
     refl = it.get("reflection") or {}

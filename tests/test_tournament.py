@@ -28,6 +28,7 @@ os.environ.setdefault("TRACK2_LEDGER", str(SCRATCH / "ledger.jsonl"))
 os.environ.setdefault("TRACK2_SOCKET", str(SCRATCH / "scorer.sock"))
 
 import numpy as np
+from agent import tournament_view as TV
 from core import artifacts as AR
 from core import budgets as BUD
 from core.ledger import verify
@@ -318,7 +319,18 @@ try:
     check("coverage is reported as OK", cov["lane_coverage_ok"] is True)
     for lane in REQUIRED_LANES:
         check(f"a candidate was considered in {lane}", cov["per_lane"][lane] >= 1)
-    cands = tourns[0]["payload"]["body"]["candidates"]
+    # The DECISION is compact: candidate prose is signed once, in tournament_proposed.
+    decision = tourns[0]["payload"]["body"]
+    refs = decision["candidate_refs"]
+    check("the signed decision carries compact candidate references only",
+          all(set(r) == {"id", "lane"} for r in refs), str(refs[0]))
+    check("the decision duplicates no candidate prose",
+          not any(k in json.dumps(decision) for k in ("hypothesis", "mechanism")),
+          str(sorted(decision)))
+    check("the decision names the proposal that holds the candidate set",
+          decision["proposal_seq"] == proposed[0]["seq"],
+          f"{decision['proposal_seq']} vs {proposed[0]['seq']}")
+    cands = proposed[0]["payload"]["body"]["candidates"]
     check("bounded signed candidates carry every executable hypothesis field",
           all(all(k in c for k in ("id", "lane", "hypothesis", "mechanism",
                                   "expected_direction", "expected_magnitude",
@@ -326,6 +338,17 @@ try:
                                   "implementation_risk", "model_family",
                                   "architecture_change"))
               for c in cands), str(sorted(cands[0])))
+    hydrated = TV.hydrate({**decision, "_seq": tourns[0]["seq"]},
+                          [{"seq": proposed[0]["seq"],
+                            **proposed[0]["payload"]["body"]}])
+    check("hydration restores every candidate description for a reader",
+          hydrated["_hydration"]["state"] == "resolved"
+          and len(hydrated["candidates"]) == len(refs)
+          and all(c.get("hypothesis") for c in hydrated["candidates"]),
+          str(hydrated["_hydration"]))
+    check("lane accounting survives compaction without hydration",
+          sum(TV.lane_counts(decision).values()) == len(refs),
+          str(TV.lane_counts(decision)))
     check("stats count architecture candidates considered",
           st["architecture_considered"] == 3, str(st["architecture_considered"]))
     check("stats count total candidates considered",

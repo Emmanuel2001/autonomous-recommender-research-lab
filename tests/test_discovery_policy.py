@@ -11,6 +11,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from agent import control_launch as CL
+from agent import tournament_view as TV
 from agent import research_driver as RD
 from agent.research_agent import (code_prompt, judge_prompt, tournament_prompt,
                                   tournament_schema)
@@ -183,19 +184,90 @@ rv["ranking"] = [{"id": c["id"], "rank": i + 1,
                  for i, c in enumerate(rich)]
 rv["why_selected"] = "long selection reason " * 500
 rv["architecture_verdicts"][0]["reason"] = "long architecture reason " * 500
+
+# THE FIELDS THAT ACTUALLY BLEW THE CAP. The previous fixture inflated only the prose
+# fields and left data_columns at two short names and personalization_pathway at one short
+# sentence, so it passed at ~fixture-minimal values while the first real eight-candidate
+# Opus tournament produced a 13,004-byte decision and was refused. Every field a candidate
+# can fill is now padded PAST its truncation limit, so the test bounds the worst case
+# rather than a typical one.
+for c in rich:
+    c["data_columns"] = [f"{n}_column_with_a_realistically_long_name" for n in range(16)]
+    c["derived_features"] = [f"derived_feature_{n}_long_name" for n in range(16)]
+    c["personalization"] = "non_personalized_ablation"
+    c["personalization_pathway"] = "user-conditioned pathway description " * 40
+    c["evidence"] = "iteration 3 evidence with a long citation " * 40
+    c["expected_magnitude"] = 0.00123456789
+    c["files_to_change"] = [f"generated_module_{n}_with_long_name.py" for n in range(8)]
+    c["runtime_estimate"] = "about forty minutes on cpu " * 30
+    c["memory_estimate"] = "about six gigabytes resident " * 30
+    c["success_criteria"] = "signed dev primary rises by at least 0.002 " * 30
+    c["failure_interpretation"] = "a negative result would settle the question " * 30
+discovery_ok_max = dict(discovery_ok)
+discovery_ok_max["coverage_note"] = "coverage rationale " * 60
+discovery_ok_max["problems"] = [f"a recorded coverage problem {n} " * 8 for n in range(4)]
+
+proposal_envelope = {"run_id": "test", "iteration": 3,
+                     "what": "tournament_proposed", "policy": "tournament",
+                     "tournament_size": 8}
+proposal_body = {**proposal_envelope,
+                 **RD.bounded_tournament_proposal_record(
+                     cands=rich, coverage=discovery_ok_max, search_mode="discovery",
+                     architecture_required=True, envelope=proposal_envelope)}
+proposal_bytes = len(canonical(proposal_body))
+check("1. maximal eight-candidate tournament_proposed fits the signed cap",
+      proposal_bytes < MAX_RECORD_BYTES, f"{proposal_bytes} < {MAX_RECORD_BYTES}")
+
 meta = RD.bounded_tournament_record(
-    cands=rich, coverage=discovery_ok, verdict=rv,
+    cands=rich, coverage=discovery_ok_max, verdict=rv,
     plan={"_candidate_id": arch["id"]}, selection_how="judge_selected_id",
-    search_mode="discovery", architecture_required=True)
+    search_mode="discovery", architecture_required=True, proposal_seq=41)
 record_body = {"run_id": "test", "iteration": 3, "what": "tournament",
                "policy": "tournament", "tournament_size": 8, **meta}
 record_bytes = len(canonical(record_body))
-check("maximal eight-candidate tournament stays under MAX_RECORD_BYTES",
+check("2. maximal compact tournament decision fits the signed cap",
       record_bytes < MAX_RECORD_BYTES, f"{record_bytes} < {MAX_RECORD_BYTES}")
-check("the bounded record retains all eight candidates and the full ranking",
-      len(meta["candidates"]) == len(meta["judge"]["ranking"]) == 8)
-check("the selected hypothesis remains readable after bounding",
-      bool(meta["candidates"][0]["hypothesis"]) and bool(meta["candidates"][0]["mechanism"]))
+
+serialized = canonical(record_body).decode()
+check("3. the decision duplicates no candidate prose",
+      not any(marker in serialized for marker in
+              ("long recorded explanation", "user-conditioned pathway description",
+               "realistically_long_name", "long citation")),
+      f"decision {record_bytes} B vs proposal {proposal_bytes} B")
+check("the decision references all eight candidates by id and lane",
+      len(meta["candidate_refs"]) == 8
+      and all(set(r) == {"id", "lane"} for r in meta["candidate_refs"]))
+check("the decision keeps the complete judge ranking",
+      len(meta["judge"]["ranking"]) == 8)
+check("the decision names its proposal record", meta["proposal_seq"] == 41)
+check("compaction freed real headroom against the old duplicated record",
+      record_bytes < proposal_bytes,
+      f"decision {record_bytes} B < proposal {proposal_bytes} B")
+
+print("== a compact decision hydrates, and an unresolvable one says so")
+proposal_record = {"seq": 41, **proposal_body}
+view = TV.hydrate(meta, [proposal_record])
+check("a compact decision resolves every candidate from its proposal",
+      view["_hydration"]["state"] == "resolved" and len(view["candidates"]) == 8
+      and all(c.get("hypothesis") for c in view["candidates"]))
+check("hydration never mutates the signed decision",
+      "candidates" not in meta and meta["candidate_refs"] is not None)
+embedded = {"iteration": 3, "candidates": [dict(c) for c in view["candidates"]],
+            "judge": meta["judge"], "selected_id": meta["selected_id"]}
+check("a historical embedded record still renders without a proposal",
+      TV.hydrate(embedded, [])["_hydration"]["state"] == "embedded"
+      and len(TV.hydrate(embedded, [])["candidates"]) == 8)
+check("a decision naming a missing proposal is an INTEGRITY state, not empty content",
+      TV.hydrate(meta, [])["_hydration"]["state"] == "unresolved"
+      and TV.hydrate(meta, [])["candidates"] == []
+      and "INTEGRITY" in TV.unavailable_note(TV.hydrate(meta, [])))
+no_seq = {k: v for k, v in meta.items() if k != "proposal_seq"}
+check("a decision naming no proposal is an unavailable-data state, not fabricated",
+      TV.hydrate(no_seq, [])["_hydration"]["state"] == "missing_seq"
+      and TV.hydrate(no_seq, [])["candidates"] == []
+      and "unavailable" in TV.unavailable_note(TV.hydrate(no_seq, [])))
+check("lane accounting works on a compact decision with no proposal available",
+      sum(TV.lane_counts(meta).values()) == 8)
 
 state_for_summary = RD.ResearchState({"name": "test"}, {})
 for i in range(10):

@@ -18,7 +18,8 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from agent import console_ui as UI          # noqa: E402
+from agent import console_ui as UI
+from agent import tournament_view as TV          # noqa: E402
 from agent.official_report import load as load_ledger   # noqa: E402
 
 R = []
@@ -71,10 +72,10 @@ def synthetic(with_summary=False, declared=DECLARED):
                                          "hypothesis": "dropout"}],
                          "coverage": {"lane_coverage_ok": True}}),
         ent(6, "event", {"what": "tournament", "iteration": 1,
-                         "candidates": [{"id": "O1", "lane": "objective_loss",
-                                         "hypothesis": "pairwise"},
-                                        {"id": "M1", "lane": "model_architecture",
-                                         "hypothesis": "dropout"}],
+                         "proposal_seq": 5,
+                         "candidates_considered": 2,
+                         "candidate_refs": [{"id": "O1", "lane": "objective_loss"},
+                                            {"id": "M1", "lane": "model_architecture"}],
                          "judge": {"selected_id": "O1", "why_selected": "aligned with metric",
                                    "ranking": [{"id": "O1", "rank": 1,
                                                 "score_expected_impact": 0.85,
@@ -289,6 +290,38 @@ if HAVE_PILOT:
           not pd["summaries"] and UI.NO_SUMMARY in text_of(UI.view_live(pd)))
 else:
     print("  [skip] runs/ledgers/pilot_portable1.jsonl absent; pilot assertions skipped")
+
+print()
+print("== D2: the board renders a compact decision, and says so when it cannot")
+live = text_of(UI.view_live(d))
+check("the board is populated from the compact decision's proposal",
+      "pairwise" in live and "dropout" in live, live[:0] or "")
+check("the judge ranking survives compaction", "#1" in live and "#2" in live)
+check("the judge explanation is rendered", "aligned with metric" in live)
+check("the selected candidate is still badged", "selected" in live.lower())
+
+_hist = {**d, "tournaments": [{"seq": 6, "what": "tournament", "iteration": 1,
+                               "candidates": [{"id": "O1", "lane": "objective_loss",
+                                               "hypothesis": "legacy embedded prose"}],
+                               "judge": {"selected_id": "O1", "ranking": [
+                                   {"id": "O1", "rank": 1}]}}],
+         "tournament_proposals": []}
+check("a historical full-candidate ledger still renders",
+      "legacy embedded prose" in text_of(UI.view_live(_hist)))
+
+_gap = {**d, "tournaments": [{"seq": 6, "what": "tournament", "iteration": 1,
+                              "proposal_seq": 999,
+                              "candidate_refs": [{"id": "O1", "lane": "objective_loss"}],
+                              "judge": {"selected_id": "O1", "ranking": []}}],
+        "tournament_proposals": []}
+_gap_text = text_of(UI.view_live(_gap))
+check("an unresolvable decision shows an explicit integrity state, not blank content",
+      "INTEGRITY" in _gap_text and "not present in this ledger" in _gap_text)
+_gap_board = text_of(UI._cand_cards(
+    TV.hydrate(_gap["tournaments"][0], _gap["tournament_proposals"])))
+check("an unresolvable decision fabricates no hypothesis text on the board",
+      "pairwise" not in _gap_board and "dropout" not in _gap_board
+      and "legacy embedded" not in _gap_board, _gap_board[:120])
 
 print()
 bad = [n for n, ok in R if not ok]

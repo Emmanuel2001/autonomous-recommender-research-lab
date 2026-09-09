@@ -153,26 +153,119 @@ def build(spec, splits: dict) -> dict:
 
 
 def column_names(contract: dict) -> set[str]:
+    """Ordinary FEATURE column names. Not the label, not the auxiliary outcomes."""
     return {str(c.get("name")) for c in (contract.get("columns") or [])
             if isinstance(c, dict) and c.get("name")}
 
 
+def declarable_names(contract: dict) -> dict[str, tuple[str, ...]]:
+    """Every name a hypothesis may declare, mapped to the splits that actually carry it.
+
+    Three surfaces, and all three are already published by the contract itself:
+
+      * feature columns, on the splits listed in their ``available_on``;
+      * the training LABEL, on the splits listed in ``label.visible_on`` -- train and dev.
+        A ranking objective cannot be written without it, and withholding it from the
+        declaration vocabulary made the harness refuse correct pairwise and listwise
+        candidates while the contract listed the label three keys away;
+      * auxiliary training outcomes, on their own ``available_on`` -- train only.
+
+    The held-out split is absent from every entry by construction: no held-out label value
+    is in this process, and ``build()`` refuses to produce a contract if one were.
+    """
+    out: dict[str, tuple[str, ...]] = {}
+    for c in (contract.get("columns") or []):
+        if isinstance(c, dict) and c.get("name"):
+            out[str(c["name"])] = tuple(str(s) for s in (c.get("available_on") or ()))
+    label = contract.get("label") or {}
+    if label.get("name"):
+        out[str(label["name"])] = tuple(str(s) for s in (label.get("visible_on") or ()))
+    for a in (contract.get("auxiliary_training_outcomes") or []):
+        if isinstance(a, dict) and a.get("name"):
+            name = str(a["name"])
+            splits = tuple(str(s) for s in (a.get("available_on") or ()))
+            # duration_ms is both a feature and a train-only aux outcome. The feature
+            # entry is the wider one, so it wins rather than being narrowed to train.
+            out[name] = tuple(dict.fromkeys(out.get(name, ()) + splits))
+    return out
+
+
+def _held_out_aliases(contract: dict) -> set[str]:
+    """Names that mean "the split whose labels decide the competition"."""
+    held = str((contract.get("split") or {}).get("held_out") or "")
+    return {s for s in (held, "heldout", "held_out", "test") if s}
+
+
+def _parse_declaration(entry: str) -> tuple[str | None, str]:
+    """``"train:is_click"`` -> ``("train", "is_click")``; ``"user_id"`` -> ``(None, ...)``.
+
+    The qualifier is OPTIONAL and exists only so a declaration can be REFUSED for using a
+    name on a split that does not carry it. It never widens access: an unqualified name is
+    checked against the splits the contract publishes, and the executable boundary is
+    agent/candidate.py's static refusal of `heldout.label`, not this declaration.
+    """
+    split, sep, name = entry.partition(":")
+    if not sep:
+        return None, entry.strip()
+    return split.strip(), name.strip()
+
+
 def candidate_column_problems(candidate: dict, contract: dict) -> list[str]:
-    """Validate a hypothesis' explicit raw-column declaration.
+    """Validate a hypothesis' explicit data declaration against the loader contract.
 
     Generated features belong in ``derived_features`` and are not treated as raw columns.
     Parsing free prose for identifiers would create false refusals, so the declaration is
     required and checked directly.
+
+    Every refusal says WHY, because the message is what the planner repairs against. An
+    earlier version reported "absent from the loader contract" for the task's own label,
+    which taught the model something false about the dataset.
     """
-    cid = str(candidate.get("id") or "candidate")
+    cid = str(candidate.get("id") or candidate.get("_candidate_id") or "candidate")
     declared = candidate.get("data_columns")
     if not isinstance(declared, list):
         return [f"candidate {cid} must declare data_columns as an array"]
     bad_types = [x for x in declared if not isinstance(x, str) or not x.strip()]
     if bad_types:
         return [f"candidate {cid} has invalid data_columns entries"]
-    unknown = sorted(set(declared) - column_names(contract))
+
+    available = declarable_names(contract)
+    held_out = _held_out_aliases(contract)
+    label_name = str((contract.get("label") or {}).get("name") or "")
+    known_splits = {s for splits in available.values() for s in splits} | held_out
+    problems: list[str] = []
+    unknown: list[str] = []
+
+    for entry in declared:
+        split, name = _parse_declaration(entry)
+        if name not in available:
+            unknown.append(name)
+            continue
+        if split is None:
+            continue
+        if split not in known_splits:
+            problems.append(
+                f"candidate {cid} qualifies {name!r} with an unknown split {split!r}; "
+                f"the declared splits are {sorted(known_splits)}")
+        elif split not in available[name]:
+            if name == label_name and split in held_out:
+                problems.append(
+                    f"candidate {cid} declares {entry!r}, but held-out label values are "
+                    f"never visible to the agent and are not in this process at all. "
+                    f"Train and early-stop on {list(available[name])} only")
+            else:
+                problems.append(
+                    f"candidate {cid} declares {entry!r}, but {name!r} is available on "
+                    f"{list(available[name])} only")
+
     if unknown:
-        return [f"candidate {cid} references columns absent from the loader contract: "
-                f"{unknown}"]
-    return []
+        feature = sorted(column_names(contract))
+        aux = sorted(str(a.get("name")) for a in
+                     (contract.get("auxiliary_training_outcomes") or [])
+                     if isinstance(a, dict) and a.get("name"))
+        problems.insert(0, (
+            f"candidate {cid} references names absent from the loader contract: "
+            f"{sorted(set(unknown))}. Declarable names are the loader feature columns "
+            f"{feature}, the label {label_name!r} (train and dev), and the train-only "
+            f"auxiliary outcomes {aux}. Computed quantities belong in derived_features"))
+    return problems

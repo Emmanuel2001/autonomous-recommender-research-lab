@@ -396,57 +396,129 @@ def plan_contract_problems(plan: dict, data_contract: dict) -> list[str]:
     return problems
 
 
-def bounded_tournament_candidates(cands: list) -> list[dict]:
-    """Bound candidate prose while preserving the executable research claims."""
-    def s(value, n):
-        return str(value or "")[:n]
+#: Per-candidate text limits at full scale. These are SHRUNK, together, until the record
+#: fits the scorer's body cap -- see `bounded_tournament_proposal_record`.
+CANDIDATE_TEXT_LIMITS = {
+    "hypothesis": 160, "mechanism": 160, "information_value": 100,
+    "model_family": 50, "architecture_change": 100,
+    "personalization_pathway": 100, "implementation_risk": 60,
+}
+#: (max entries, max chars per entry) for the list fields, likewise scaled.
+CANDIDATE_LIST_LIMITS = {"files_to_change": (8, 40), "data_columns": (16, 40)}
+#: Scales tried in order. 1.0 is what a normal six-candidate tournament uses; the lower
+#: rungs exist so twelve verbose candidates still produce a RECORDED tournament rather than
+#: a refused one. Nothing below trims a candidate out of the set -- only its prose.
+CANDIDATE_SCALES = (1.0, 0.8, 0.62, 0.48, 0.36, 0.26, 0.18)
 
+
+def bounded_tournament_candidates(cands: list, scale: float = 1.0) -> list[dict]:
+    """Bound candidate prose while preserving the executable research claims.
+
+    `scale` shrinks every text limit together. Identity, lane, direction, magnitude and the
+    personalization mode are never scaled: they are short, and they are what the coverage
+    and realization checks read.
+    """
+    def s(value, n):
+        return str(value or "")[:max(16, int(n * scale))]
+
+    def lst(value, key):
+        n, width = CANDIDATE_LIST_LIMITS[key]
+        n = max(4, int(n * scale))
+        width = max(12, int(width * scale))
+        return [str(x or "")[:width] for x in (value or [])[:n]]
+
+    t = CANDIDATE_TEXT_LIMITS
     candidates = []
     for c in cands:
         candidates.append({
-            "id": s(c.get("id"), 24), "lane": s(c.get("lane"), 32),
-            "hypothesis": s(c.get("hypothesis"), 160),
-            "mechanism": s(c.get("mechanism"), 160),
-            "expected_direction": s(c.get("expected_direction"), 16),
+            "id": str(c.get("id") or "")[:24], "lane": str(c.get("lane") or "")[:32],
+            "hypothesis": s(c.get("hypothesis"), t["hypothesis"]),
+            "mechanism": s(c.get("mechanism"), t["mechanism"]),
+            "expected_direction": str(c.get("expected_direction") or "")[:16],
             "expected_magnitude": c.get("expected_magnitude"),
-            "information_value": s(c.get("information_value"), 100),
-            "model_family": s(c.get("model_family"), 50),
-            "architecture_change": s(c.get("architecture_change"), 100),
-            "files_to_change": [s(x, 40) for x in (c.get("files_to_change") or [])[:8]],
-            "data_columns": [s(x, 40) for x in (c.get("data_columns") or [])[:16]],
-            "personalization": s(c.get("personalization"), 32),
-            "personalization_pathway": s(c.get("personalization_pathway"), 100),
-            "implementation_risk": s(c.get("implementation_risk"), 60),
+            "information_value": s(c.get("information_value"), t["information_value"]),
+            "model_family": s(c.get("model_family"), t["model_family"]),
+            "architecture_change": s(c.get("architecture_change"),
+                                     t["architecture_change"]),
+            "files_to_change": lst(c.get("files_to_change"), "files_to_change"),
+            "data_columns": lst(c.get("data_columns"), "data_columns"),
+            "personalization": str(c.get("personalization") or "")[:32],
+            "personalization_pathway": s(c.get("personalization_pathway"),
+                                         t["personalization_pathway"]),
+            "implementation_risk": s(c.get("implementation_risk"),
+                                     t["implementation_risk"]),
         })
     return candidates
 
 
+def _fits(body: dict, cap: int) -> int:
+    from core.ledger import canonical
+    return len(canonical(body))
+
+
 def bounded_tournament_proposal_record(*, cands: list, coverage: dict,
                                        search_mode: str,
-                                       architecture_required: bool) -> dict:
-    """The signed candidate set, recorded before the independent judge is called."""
-    return {
+                                       architecture_required: bool,
+                                       envelope: dict | None = None,
+                                       cap: int | None = None) -> dict:
+    """The signed candidate set, recorded before the independent judge is called.
+
+    WHY THE BOUND IS ADAPTIVE. Fixed per-field limits cannot bound a record whose size is
+    the product of a variable candidate count and variable prose. Eight candidates filling
+    every field to the old fixed limits serialised to 19,164 bytes against a 12,288-byte
+    cap -- and a refused record ABANDONS a paid iteration. So the prose scale steps down
+    until the whole body fits, and the applied scale is disclosed in the record rather
+    than trimming silently. The candidate SET is never reduced: a reader always sees every
+    hypothesis that competed, even if each is described more briefly.
+    """
+    from core.scorer import MAX_RECORD_BYTES
+    cap = MAX_RECORD_BYTES if cap is None else cap
+    base = {
         "coverage": coverage,
         "search_mode": search_mode,
         "architecture_selection_required": architecture_required,
-        "candidates": bounded_tournament_candidates(cands),
-        "record_note": ("candidate prose is bounded for the signed 12,288-byte record; "
-                        "the full in-memory candidates continue unchanged to the judge"),
     }
+    for scale in CANDIDATE_SCALES:
+        record = {
+            **base,
+            "candidates": bounded_tournament_candidates(cands, scale),
+            "candidate_prose_scale": round(scale, 2),
+            "record_note": ("candidate prose is bounded for the signed record; the full "
+                            "in-memory candidates continue unchanged to the judge"),
+        }
+        body = {**(envelope or {}), **record}
+        if _fits(body, cap) < cap:
+            return record
+    # Every scale still overflows: the coverage block itself must be the bulk. Say so in
+    # the record instead of returning something the scorer will refuse.
+    record["candidate_prose_scale"] = round(CANDIDATE_SCALES[-1], 2)
+    record["record_note"] = ("candidate prose bounded to the minimum scale; this record "
+                             "may still exceed the signed body cap and be refused")
+    return record
 
 
 def bounded_tournament_record(*, cands: list, coverage: dict, verdict: dict,
                               plan: dict, selection_how: str, search_mode: str,
-                              architecture_required: bool) -> dict:
-    """A complete-enough tournament decision that stays under the scorer body cap.
+                              architecture_required: bool,
+                              proposal_seq=None) -> dict:
+    """The judge's DECISION, compact by design. The candidate set lives in the proposal.
 
-    The candidate set has already been signed in ``tournament_proposed``. This record adds
-    the judge's ranking and selected plan before candidate source exists or executes.
+    ``tournament_proposed`` already signs every bounded candidate description, and this
+    record carries ``proposal_seq`` pointing at it. Repeating the descriptions here cost
+    ~8.8 kB of the scorer's 12,288-byte body cap and, on the first real eight-candidate
+    Opus tournament, pushed the decision to 13,004 bytes -- so a judged iteration was
+    abandoned after the planner and judge had both been paid for. One signed record owns
+    the candidate set; this one owns the decision.
+
+    ``candidate_refs`` keeps id and lane, which is what the lane-accounting in the report
+    needs and what makes the decision independently readable: which lanes competed, how
+    they ranked, which won. Full prose is resolved through ``proposal_seq`` by
+    agent.tournament_view.hydrate.
     """
     def s(value, n):
         return str(value or "")[:n]
 
-    candidates = bounded_tournament_candidates(cands)
+    refs = [{"id": s(c.get("id"), 24), "lane": s(c.get("lane"), 32)} for c in cands]
     ranking = []
     for r in (verdict.get("ranking") or [])[:12]:
         if not isinstance(r, dict):
@@ -463,11 +535,15 @@ def bounded_tournament_record(*, cands: list, coverage: dict, verdict: dict,
         for v in (verdict.get("architecture_verdicts") or [])[:12]
         if isinstance(v, dict)]
     return {
+        "proposal_seq": proposal_seq,
         "coverage": coverage, "selection_how": selection_how,
         "search_mode": search_mode,
         "architecture_selection_required": architecture_required,
         "selected_id": plan.get("_candidate_id"),
-        "candidates": candidates,
+        "candidates_considered": len(cands),
+        "architecture_considered": sum(
+            1 for c in cands if c.get("lane") == "model_architecture"),
+        "candidate_refs": refs,
         "judge": {
             "selected_id": s(verdict.get("selected_id"), 24),
             "ranking": ranking,
@@ -476,9 +552,9 @@ def bounded_tournament_record(*, cands: list, coverage: dict, verdict: dict,
             "exploit_or_explore": s(verdict.get("exploit_or_explore"), 16),
             "convergence_note": s(verdict.get("convergence_note"), 120),
         },
-        "record_note": ("candidate prose is bounded for the signed 12,288-byte record; "
-                        "novelty/runtime/leakage prose and ranking notes are omitted; the "
-                        "selected coder plan is unabridged"),
+        "record_note": ("compact decision: candidate descriptions are signed once in the "
+                        "tournament_proposed record named by proposal_seq and are not "
+                        "duplicated here. Readers hydrate them from that record."),
     }
 
 
@@ -881,13 +957,13 @@ def research_loop(*, agent, splits, edges, spec, state: ResearchState, budget: B
                     # Preserve the paid planner result before asking the independent judge.
                     # A judge transport failure must not make a generated tournament vanish
                     # from the signed evidence or be misdiagnosed as a planner failure.
+                    envelope = {"run_id": run_id, "iteration": it_no,
+                                "what": "tournament_proposed", "policy": policy,
+                                "tournament_size": tournament_size}
                     proposed = bounded_tournament_proposal_record(
                         cands=cands, coverage=cov, search_mode=search_mode,
-                        architecture_required=architecture_due)
-                    ok, tournament_proposal_seq = rec("event", {
-                        "run_id": run_id, "iteration": it_no,
-                        "what": "tournament_proposed", "policy": policy,
-                        "tournament_size": tournament_size, **proposed})
+                        architecture_required=architecture_due, envelope=envelope)
+                    ok, tournament_proposal_seq = rec("event", {**envelope, **proposed})
                     if not ok:
                         stats["unregistered_aborts"] += 1
                         say(f"       ABANDONED: the tournament proposal could not be "
@@ -947,7 +1023,8 @@ def research_loop(*, agent, splits, edges, spec, state: ResearchState, budget: B
                     tourn_meta = bounded_tournament_record(
                         cands=cands, coverage=cov, verdict=verdict, plan=plan,
                         selection_how=how, search_mode=search_mode,
-                        architecture_required=architecture_due)
+                        architecture_required=architecture_due,
+                        proposal_seq=tournament_proposal_seq)
                     say(f"       tournament: {len(cands)} candidates "
                         f"({sum(1 for c in cands if c['lane']=='model_architecture')} "
                         f"architecture) -> chose {plan.get('_candidate_id')} "
@@ -1194,10 +1271,10 @@ def research_loop(*, agent, splits, edges, spec, state: ResearchState, budget: B
                         stage=str(plan.get("stage", "")), files_changed=changed,
                         lane=str(plan.get("lane", "")),
                         considered_in_lane=(0 if tourn_meta is None else sum(
-                            1 for c in tourn_meta["candidates"]
+                            1 for c in tourn_meta["candidate_refs"]
                             if c.get("lane") == plan.get("lane"))),
                         tournament_size=(0 if tourn_meta is None
-                                         else len(tourn_meta["candidates"])),
+                                         else len(tourn_meta["candidate_refs"])),
                         mechanism=str(plan.get("mechanism", ""))[:600],
                         diff_hash=AR.diff_hash(diff), diff_bytes=len(diff.encode()),
                         expected_direction=str(plan.get("expected_direction", "")),
@@ -1259,10 +1336,10 @@ def research_loop(*, agent, splits, edges, spec, state: ResearchState, budget: B
                     stage=str(plan.get("stage", "")), files_changed=changed,
                     lane=str(plan.get("lane", "")),
                     considered_in_lane=(0 if tourn_meta is None else sum(
-                        1 for c in tourn_meta["candidates"]
+                        1 for c in tourn_meta["candidate_refs"]
                         if c.get("lane") == plan.get("lane"))),
                     tournament_size=(0 if tourn_meta is None
-                                     else len(tourn_meta["candidates"])),
+                                     else len(tourn_meta["candidate_refs"])),
                     mechanism=str(plan.get("mechanism", ""))[:600],
                     diff_hash=AR.diff_hash(diff), diff_bytes=len(diff.encode()),
                     expected_direction=str(plan.get("expected_direction", "")),
@@ -1295,7 +1372,7 @@ def research_loop(*, agent, splits, edges, spec, state: ResearchState, budget: B
                     stage=str(plan.get("stage", "")),
                     lane=str(plan.get("lane", "")),
                     tournament_size=(0 if tourn_meta is None
-                                     else len(tourn_meta["candidates"])),
+                                     else len(tourn_meta["candidate_refs"])),
                     mechanism=str(plan.get("mechanism", ""))[:600],
                     files_changed=list(plan.get("_files_changed") or []),
                     expected_direction=str(plan.get("expected_direction", "")),

@@ -242,6 +242,71 @@ _route = (ROOT / "agent" / "control.py").read_text()
 check("control.py's /report tests is_research BEFORE is_official",
       _route.index("if is_research(e):") < _route.index("if not is_official(e):"))
 
+print("== D2: the report resolves compact tournament decisions")
+from agent import tournament_view as TV
+
+_full = [{"id": "O1", "lane": "objective_loss", "hypothesis": "within-user BPR pairwise",
+          "mechanism": "aligns training with the ranking metric",
+          "files_to_change": ["train.py"], "expected_magnitude": 0.004,
+          "information_value": "settles whether the objective is the lever"},
+         {"id": "M1", "lane": "model_architecture", "hypothesis": "LightGBM LambdaRank",
+          "mechanism": "tree conjunctions over dense fields",
+          "files_to_change": ["model.py"], "expected_magnitude": 0.006,
+          "information_value": "settles the tree family"}]
+_judge = {"selected_id": "O1", "why_selected": "the objective is the cheapest lever",
+          "ranking": [{"id": "O1", "rank": 1}, {"id": "M1", "rank": 2}],
+          "architecture_verdicts": [{"candidate_id": "M1", "verdict": "rejected",
+                                     "reason": "no user-side features exist yet"}],
+          "exploit_or_explore": "exploit"}
+_proposal = {"_seq": 6, "iteration": 1, "what": "tournament_proposed",
+             "candidates": _full, "coverage": {"lane_coverage_ok": True}}
+_compact = {"_seq": 9, "iteration": 1, "what": "tournament", "proposal_seq": 6,
+            "selected_id": "O1", "selection_how": "judge_selected_id",
+            "candidates_considered": 2,
+            "candidate_refs": [{"id": "O1", "lane": "objective_loss"},
+                               {"id": "M1", "lane": "model_architecture"}],
+            "coverage": {"lane_coverage_ok": True, "missing_required_lanes": []},
+            "judge": _judge}
+
+_html = RR._sec_tournaments({"tournaments": [_compact],
+                             "tournament_proposals": [_proposal]})
+check("a compact decision renders every hypothesis",
+      "within-user BPR pairwise" in _html and "LightGBM LambdaRank" in _html)
+check("a compact decision renders the judge ranking and rationale",
+      "the objective is the cheapest lever" in _html
+      and "no user-side features exist yet" in _html)
+check("the rendered section names the record the candidates came from",
+      "candidates from seq 6" in _html)
+check("lane accounting survives compaction without hydration",
+      TV.lane_counts(_compact) == {"objective_loss": 1, "model_architecture": 1},
+      str(TV.lane_counts(_compact)))
+
+_legacy = {"_seq": 9, "iteration": 1, "what": "tournament", "selected_id": "O1",
+           "candidates": _full, "judge": _judge, "coverage": {}}
+_legacy_html = RR._sec_tournaments({"tournaments": [_legacy],
+                                    "tournament_proposals": []})
+check("a historical full-candidate ledger still renders completely",
+      "within-user BPR pairwise" in _legacy_html
+      and "LightGBM LambdaRank" in _legacy_html)
+check("historical lane accounting is unchanged",
+      TV.lane_counts(_legacy) == {"objective_loss": 1, "model_architecture": 1})
+
+_orphan_html = RR._sec_tournaments({"tournaments": [_compact],
+                                    "tournament_proposals": []})
+check("an unresolvable decision states the integrity gap in the report",
+      "INTEGRITY" in _orphan_html and "not present in this ledger" in _orphan_html)
+check("an unresolvable decision invents no hypothesis prose",
+      "within-user BPR pairwise" not in _orphan_html)
+check("an unresolvable decision still reports its lane accounting",
+      TV.lane_counts(_compact)["model_architecture"] == 1)
+
+_noseq = {k: v for k, v in _compact.items() if k != "proposal_seq"}
+_noseq_html = RR._sec_tournaments({"tournaments": [_noseq],
+                                   "tournament_proposals": []})
+check("a decision naming no proposal reports unavailable data, not an integrity breach",
+      "unavailable" in _noseq_html and "INTEGRITY" not in _noseq_html)
+
+
 shutil.rmtree(TMP, ignore_errors=True)
 print()
 bad = [n for n, ok in R if not ok]

@@ -1,4 +1,4 @@
-# Autonomous ML Research Agent: TikTok TechJam 2026, Track 2
+# Autonomous ML Research Agent: TikTok TechJam 2026, Track 2 Solo Finalist
 
 An LLM agent that **writes the strategy code** for a recommender-system experiment, runs it
 behind a kernel sandbox, and is scored by a separate signing process it cannot reach.
